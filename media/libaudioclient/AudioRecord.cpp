@@ -18,7 +18,11 @@
 //#define LOG_NDEBUG 0
 #define LOG_TAG "AudioRecord"
 
+#include <dlfcn.h>
 #include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+#include <string>
 #include <android-base/macros.h>
 #include <sys/resource.h>
 
@@ -40,6 +44,9 @@
 
 namespace android {
 // ---------------------------------------------------------------------------
+
+// PICO: AudioRecord receiving the pvrmanager screen events
+AudioRecord* AudioRecord::mPicoAudioRecord = nullptr;
 
 // static
 status_t AudioRecord::getMinFrameCount(
@@ -166,6 +173,23 @@ AudioRecord::~AudioRecord()
     mMediaMetrics.gather(this);
 
     if (mStatus == NO_ERROR) {
+        // PICO: unregister from pvrmanager and stop the PicoAudioRecordThread
+        // before the record is stopped.
+        if (mPicoCallbackRegistered) {
+            mPicoRemoveCallback();
+        }
+        if (mPicoLibHandle != nullptr) {
+            mPicoLibHandle = nullptr;
+        }
+        if (mPicoAudioRecord != nullptr) {
+            mPicoAudioRecord = nullptr;
+        }
+        if (mPicoAudioRecordThread != 0) {
+            mPicoAudioRecordThread->requestExit();  // see comment in AudioRecord.h
+            mPicoAudioRecordThread->requestExitAndWait();
+            mPicoAudioRecordThread.clear();
+        }
+
         // Make sure that callback function exits in the case where
         // it is looping on buffer empty condition in obtainBuffer().
         // Otherwise the callback thread will never exit.
@@ -189,6 +213,21 @@ AudioRecord::~AudioRecord()
                 __func__, mPortId, mSessionId);
         AudioSystem::releaseAudioSessionId(mSessionId, -1 /*pid*/);
     }
+}
+
+// PICO: process name (first 127 bytes of /proc/<pid>/cmdline) used as package name
+status_t AudioRecord::getProcessNameForPid(int pid, String16& processName)
+{
+    FILE* fp = fopen(String8::format("/proc/%d/cmdline", pid).string(), "r");
+    if (fp == NULL) {
+        return INVALID_OPERATION;
+    }
+    char name[128] = {0};
+    fgets(name, sizeof(name), fp);
+    fclose(fp);
+    processName.setTo(String16(name));
+    ALOGD("%s [%d] [%s]", __func__, pid, String8(processName).string());
+    return NO_ERROR;
 }
 
 status_t AudioRecord::set(
@@ -217,7 +256,8 @@ status_t AudioRecord::set(
     pid_t myPid;
 
     // Note mPortId is not valid until the track is created, so omit mPortId in ALOG for set.
-    ALOGV("%s(): inputSource %d, sampleRate %u, format %#x, channelMask %#x, frameCount %zu, "
+    // PICO: logged at debug level
+    ALOGD("%s(): inputSource %d, sampleRate %u, format %#x, channelMask %#x, frameCount %zu, "
           "notificationFrames %u, sessionId %d, transferType %d, flags %#x, opPackageName %s "
           "uid %d, pid %d",
           __func__,
@@ -325,6 +365,14 @@ status_t AudioRecord::set(
         mClientPid = pid;
     }
 
+    // PICO: a system or root client without a package name is identified by its process name
+    if (strlen(String8(mOpPackageName).string()) == 0 &&
+            (mClientUid == 1000 /* AID_SYSTEM */ || mClientUid == 0 /* AID_ROOT */)) {
+        if (getProcessNameForPid(mClientPid, mOpPackageName) != NO_ERROR) {
+            ALOGE("%s getProcessNameForPid failed", __func__);
+        }
+    }
+
     mOrigFlags = mFlags = flags;
     mCbf = cbf;
 
@@ -332,6 +380,12 @@ status_t AudioRecord::set(
         mAudioRecordThread = new AudioRecordThread(*this);
         mAudioRecordThread->run("AudioRecord", ANDROID_PRIORITY_AUDIO);
         // thread begins in paused state, and will not reference us until start()
+
+        // PICO: callback-driven clients still without a package name follow the screen state
+        if (String8(mOpPackageName).length() == 0) {
+            mPicoAudioRecordThread = new PicoAudioRecordThread(this);
+            mPicoAudioRecordThread->run("PicoAudioRecord", ANDROID_PRIORITY_AUDIO);
+        }
     }
 
     // create the IAudioRecord
@@ -347,6 +401,21 @@ status_t AudioRecord::set(
             mAudioRecordThread->requestExit();   // see comment in AudioRecord.h
             mAudioRecordThread->requestExitAndWait();
             mAudioRecordThread.clear();
+        }
+        // PICO: same teardown as in ~AudioRecord()
+        if (mPicoCallbackRegistered) {
+            mPicoRemoveCallback();
+        }
+        if (mPicoLibHandle != nullptr) {
+            mPicoLibHandle = nullptr;
+        }
+        if (mPicoAudioRecord != nullptr) {
+            mPicoAudioRecord = nullptr;
+        }
+        if (mPicoAudioRecordThread != 0) {
+            mPicoAudioRecordThread->requestExit();   // see comment in AudioRecord.h
+            mPicoAudioRecordThread->requestExitAndWait();
+            mPicoAudioRecordThread.clear();
         }
         goto exit;
     }
@@ -723,7 +792,20 @@ status_t AudioRecord::createRecord_l(const Modulo<uint32_t> &epoch, const String
             input.clientInfo.clientTid = mAudioRecordThread->getTid();
         }
     }
-    input.opPackageName = opPackageName;
+    // PICO: a system client without a package name is identified by its process name
+    ALOGD("%s mClientUid %d, opPackageName [%s]. ", __func__, mClientUid,
+            String8(opPackageName).string());
+    if (strlen(String8(opPackageName).string()) == 0 && mClientUid == 1000 /* AID_SYSTEM */) {
+        String16 processName;
+        if (getProcessNameForPid(mClientPid, processName) == NO_ERROR) {
+            input.opPackageName = processName;
+        } else {
+            input.opPackageName = opPackageName;
+            ALOGE("%s getProcessNameForPid failed", __func__);
+        }
+    } else {
+        input.opPackageName = opPackageName;
+    }
     input.riid = mTracker->getRiid();
 
     input.flags = mFlags;
@@ -1547,6 +1629,187 @@ void AudioRecord::AudioRecordThread::wake()
 }
 
 void AudioRecord::AudioRecordThread::pauseInternal(nsecs_t ns)
+{
+    AutoMutex _l(mMyLock);
+    mPausedInt = true;
+    mPausedNs = ns;
+}
+
+// =========================================================================
+// PICO: screen off/on handling through libpvrmanager.pxr.so
+
+// static
+void AudioRecord::PicoRecordCallback(const char* event, const char* value __unused)
+{
+    AudioRecord* audioRecord = mPicoAudioRecord;
+    if (audioRecord == nullptr) {
+        ALOGW("Not init mPicoAudioRecord callback!");
+        return;
+    }
+    if (strstr(event, "system_screen_off") != nullptr) {
+        sp<PicoAudioRecordThread> t = audioRecord->mPicoAudioRecordThread;
+        if (t != 0) {
+            t->wake(PicoAudioRecordThread::PICO_EVENT_SCREEN_OFF);
+        }
+    } else if (strstr(event, "system_screen_on") != nullptr) {
+        sp<PicoAudioRecordThread> t = audioRecord->mPicoAudioRecordThread;
+        if (t != 0) {
+            t->wake(PicoAudioRecordThread::PICO_EVENT_SCREEN_ON);
+        }
+    }
+}
+
+bool AudioRecord::loadSymbol(const char* name, void** symbol)
+{
+    *symbol = dlsym(mPicoLibHandle, name);
+    if (*symbol == nullptr) {
+        ALOGE("Unable to load symbol : %s :: %s", name, dlerror());
+        return false;
+    }
+    return true;
+}
+
+status_t AudioRecord::initPicoRecordCallback(AudioRecord* audioRecord)
+{
+    const std::string libName = "libpvrmanager.pxr.so";
+    void* symbol;
+
+    mPicoLibHandle = dlopen(libName.c_str(), RTLD_NOW);
+    if (mPicoLibHandle == nullptr) {
+        ALOGE("Error opening library:%s reason:%s\n", libName.c_str(), dlerror());
+        return NO_INIT;
+    }
+    if (!loadSymbol("addCallback", &symbol)) {
+        goto error;
+    }
+    mPicoAddCallback = (pico_add_callback_t) symbol;
+    if (!loadSymbol("removeCallback", &symbol)) {
+        goto error;
+    }
+    mPicoRemoveCallback = (pico_remove_callback_t) symbol;
+
+    if (!mPicoCallbackRegistered) {
+        mPicoAddCallback(PicoRecordCallback);
+        mPicoCallbackRegistered = true;
+    }
+    mPicoAudioRecord = audioRecord;
+    ALOGD("Init mPicoAudioRecord callback sucess.");
+    return NO_ERROR;
+
+error:
+    // the library is not dlclose()d, the handle is only dropped
+    if (mPicoLibHandle != nullptr) {
+        mPicoLibHandle = nullptr;
+    }
+    return NO_INIT;
+}
+
+AudioRecord::PicoAudioRecordThread::PicoAudioRecordThread(AudioRecord* receiver)
+    : Thread(true /* bCanCallJava */)  // binder recursion on restoreRecord_l() may call Java.
+    , mReceiver(receiver), mPaused(true), mPausedInt(false), mPausedNs(0LL),
+      mIgnoreNextPausedInt(false), mStoppedByPico(false), mEvent(0)
+{
+}
+
+AudioRecord::PicoAudioRecordThread::~PicoAudioRecordThread()
+{
+}
+
+bool AudioRecord::PicoAudioRecordThread::threadLoop()
+{
+    {
+        AutoMutex _l(mMyLock);
+        if (mPaused) {
+            // first loop: register the pvrmanager callback, then wait for an event
+            if (!mReceiver->mPicoCallbackRegistered) {
+                mReceiver->initPicoRecordCallback(mReceiver);
+            }
+            mPaused = false;
+            mMyCond.wait(mMyLock);
+            // caller will check for exitPending()
+            return true;
+        }
+        if (mIgnoreNextPausedInt) {
+            mIgnoreNextPausedInt = false;
+            mPausedInt = false;
+        }
+        if (mPausedInt) {
+            if (mPausedNs > 0) {
+                (void) mMyCond.waitRelative(mMyLock, mPausedNs);
+                mPausedNs = 0;
+            } else {
+                mMyCond.wait(mMyLock);
+            }
+            mPausedInt = false;
+            return true;
+        }
+    }
+    if (exitPending()) {
+        return false;
+    }
+    switch (mEvent) {
+    case PICO_EVENT_SCREEN_OFF: {
+        // wake() armed a grace period: wait it out first (a screen on event cuts it short)
+        nsecs_t ns = mPausedNs;
+        if (ns > 0) {
+            pauseInternal(ns);
+            return true;
+        }
+        if (!mReceiver->stopped()) {
+            mReceiver->stop();
+            mStoppedByPico = true;
+        }
+        break;
+    }
+    case PICO_EVENT_SCREEN_ON:
+        // only restart a capture that was stopped by us
+        if (mStoppedByPico && mReceiver->stopped()) {
+            mReceiver->start();
+            mStoppedByPico = false;
+        }
+        break;
+    default:
+        break;
+    }
+    pauseInternal();
+    return true;
+}
+
+void AudioRecord::PicoAudioRecordThread::requestExit()
+{
+    // must be in this order to avoid a race condition
+    Thread::requestExit();
+    resume();
+}
+
+void AudioRecord::PicoAudioRecordThread::pause(bool paused)
+{
+    AutoMutex _l(mMyLock);
+    mPaused = paused;
+}
+
+void AudioRecord::PicoAudioRecordThread::resume()
+{
+    AutoMutex _l(mMyLock);
+    mIgnoreNextPausedInt = true;
+    mMyCond.signal();
+}
+
+void AudioRecord::PicoAudioRecordThread::wake(int event)
+{
+    AutoMutex _l(mMyLock);
+    ALOGD("PicoAudioRecordThread::wake event=%d", event);
+    if (event == PICO_EVENT_SCREEN_OFF) {
+        mEvent = event;
+        mPausedNs = 3000000000LL;   // stop the capture 3 s after screen off
+        mMyCond.signal();
+    } else if (event == PICO_EVENT_SCREEN_ON) {
+        mEvent = event;
+        mMyCond.signal();
+    }
+}
+
+void AudioRecord::PicoAudioRecordThread::pauseInternal(nsecs_t ns)
 {
     AutoMutex _l(mMyLock);
     mPausedInt = true;

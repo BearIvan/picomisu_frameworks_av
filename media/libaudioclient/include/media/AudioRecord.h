@@ -771,6 +771,64 @@ private:
         std::string mLastErrorFunc;
     };
     MediaMetrics mMediaMetrics;
+
+private:
+    // PICO: stops the capture on the pvrmanager "system_screen_off" event and restarts it
+    // on "system_screen_on". The events come from libpvrmanager.pxr.so, which is dlopen()ed
+    // by the thread on its first loop; everything is a no-op if the library is missing.
+    class PicoAudioRecordThread : public Thread
+    {
+    public:
+        enum {
+            PICO_EVENT_SCREEN_OFF = 1,
+            PICO_EVENT_SCREEN_ON  = 2,
+        };
+
+        PicoAudioRecordThread(AudioRecord* receiver);
+
+        // Do not call Thread::requestExitAndWait() without first calling requestExit().
+        virtual void        requestExit();
+
+                void        pause(bool paused);
+                void        resume();
+                void        wake(int event);    // PICO_EVENT_SCREEN_OFF or PICO_EVENT_SCREEN_ON
+
+    private:
+                void        pauseInternal(nsecs_t ns = 0LL);
+
+        friend class AudioRecord;
+        virtual bool        threadLoop();
+        AudioRecord*        mReceiver;
+        virtual ~PicoAudioRecordThread();
+        Mutex               mMyLock;    // Thread::mLock is private
+        Condition           mMyCond;    // Thread::mThreadExitedCondition is private
+        bool                mPaused;    // initial state: register the callback, then wait
+        bool                mPausedInt;
+        nsecs_t             mPausedNs;
+        bool                mIgnoreNextPausedInt;
+        bool                mStoppedByPico; // mReceiver was stopped on screen off
+        int                 mEvent;         // last PICO_EVENT_* received
+    };
+
+    // libpvrmanager.pxr.so C API
+    typedef void (*pico_record_callback_t)(const char* event, const char* value);
+    typedef void (*pico_add_callback_t)(pico_record_callback_t callback);
+    typedef void (*pico_remove_callback_t)();   // removes all callbacks of getpid()
+
+            status_t    initPicoRecordCallback(AudioRecord* audioRecord);
+            bool        loadSymbol(const char* name, void** symbol);
+            status_t    getProcessNameForPid(int pid, String16& processName);
+    static  void        PicoRecordCallback(const char* event, const char* value);
+
+    pico_add_callback_t     mPicoAddCallback = nullptr;
+    pico_remove_callback_t  mPicoRemoveCallback = nullptr;
+    void*                   mPicoLibHandle = nullptr;   // never dlclose()d, only forgotten
+    bool                    mPicoCallbackRegistered = false;
+    sp<PicoAudioRecordThread> mPicoAudioRecordThread;
+
+    // AudioRecord that receives the pvrmanager events (the last one whose
+    // PicoAudioRecordThread registered); process wide.
+    static AudioRecord*     mPicoAudioRecord;
 };
 
 }; // namespace android
