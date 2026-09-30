@@ -86,4 +86,34 @@ int requestCpusetBoost(bool enable, const sp<IInterface> &client)
     return ret;
 }
 
+int requestThreadCpuset(pid_t pid, pid_t tid, int32_t group, bool asynchronous)
+{
+    int ret;
+    for (;;) {
+        sMutex.lock();
+        sp<ISchedulingPolicyService> sps = sSchedulingPolicyService;
+        sMutex.unlock();
+        if (sps == 0) {
+            sp<IBinder> binder = defaultServiceManager()->checkService(_scheduling_policy);
+            if (binder == 0) {
+                sleep(1);
+                continue;
+            }
+            sps = interface_cast<ISchedulingPolicyService>(binder);
+            sMutex.lock();
+            sSchedulingPolicyService = sps;
+            sMutex.unlock();
+        }
+        ret = sps->requestThreadCpuset(pid, tid, group, asynchronous);
+        if (ret != DEAD_OBJECT) {
+            break;
+        }
+        ALOGW("SchedulingPolicyService died");
+        sMutex.lock();
+        sSchedulingPolicyService.clear();
+        sMutex.unlock();
+    }
+    return ret;
+}
+
 }   // namespace android

@@ -31,4 +31,5 @@ interface IPlayer {
     oneway void setStartDelayMs(int delayMs);
     oneway void applyVolumeShaper(in Configuration configuration,
                                   in Operation operation);
+    oneway void setExtVolume(float vol);
 }

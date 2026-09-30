@@ -37,6 +37,11 @@ int requestPriority(pid_t pid, pid_t tid, int32_t prio, bool isForApp, bool asyn
 // 'client' is ignored in this case.
 int requestCpusetBoost(bool enable, const sp<IInterface> &client);
 
+// Request to move thread tid of audioserver, whose thread group leader must be pid,
+// into thread group 'group' and its cpuset.
+// The asynchronous parameter has the same meaning as for requestPriority().
+int requestThreadCpuset(pid_t pid, pid_t tid, int32_t group, bool asynchronous = false);
+
 }   // namespace android
 
 #endif  // _ANDROID_SCHEDULING_POLICY_SERVICE_H

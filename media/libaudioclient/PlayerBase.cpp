@@ -28,6 +28,7 @@ using media::VolumeShaper;
 PlayerBase::PlayerBase() : BnPlayer(),
         mPanMultiplierL(1.0f), mPanMultiplierR(1.0f),
         mVolumeMultiplierL(1.0f), mVolumeMultiplierR(1.0f),
+        mExtVolume(1.0f),
         mPIId(PLAYER_PIID_INVALID), mLastReportedEvent(PLAYER_STATE_UNKNOWN)
 {
     ALOGD("PlayerBase::PlayerBase()");
@@ -148,6 +149,22 @@ binder::Status PlayerBase::setVolume(float vol) {
     status_t status = playerSetVolume();
     if (status != NO_ERROR) {
         ALOGW("PlayerBase::setVolume() error %d", status);
+    }
+    return binder::Status::fromStatusT(status);
+}
+
+binder::Status PlayerBase::setExtVolume(float vol) {
+    ALOGD("PlayerBase::setExtVolume() from IPlayer");
+    if (vol < 0.0f || vol > 1.0f) {
+        return binder::Status::fromStatusT(BAD_VALUE);
+    }
+    {
+        Mutex::Autolock _l(mSettingsLock);
+        mExtVolume = vol;
+    }
+    status_t status = playerSetVolume();
+    if (status != NO_ERROR) {
+        ALOGW("PlayerBase::setExtVolume() error %d", status);
     }
     return binder::Status::fromStatusT(status);
 }

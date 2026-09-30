@@ -42,6 +42,7 @@ public:
     virtual binder::Status applyVolumeShaper(
             const media::VolumeShaper::Configuration& configuration,
             const media::VolumeShaper::Operation& operation) override;
+    virtual binder::Status setExtVolume(float vol) override;
 
             status_t startWithStatus();
             status_t pauseWithStatus();
@@ -67,6 +68,8 @@ protected:
     // volume multipliers coming from the IPlayer volume and pan controls
     float mPanMultiplierL, mPanMultiplierR;
     float mVolumeMultiplierL, mVolumeMultiplierR;
+    // PICO extra volume multiplier coming from the IPlayer setExtVolume control
+    float mExtVolume;
 
 private:
             // report events to AudioService

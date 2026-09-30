@@ -414,7 +414,8 @@ protected:
 
         android::status_t playerSetVolume() override {
             // No pan and only left volume is taken into account from IPLayer interface
-            mParent->setDuckAndMuteVolume(mVolumeMultiplierL  /* * mPanMultiplierL */);
+            mParent->setDuckAndMuteVolume(mVolumeMultiplierL * mExtVolume
+                    /* * mPanMultiplierL */);
             return android::NO_ERROR;
         }
 

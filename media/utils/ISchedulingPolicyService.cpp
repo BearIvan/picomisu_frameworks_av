@@ -26,6 +26,7 @@ namespace android {
 enum {
     REQUEST_PRIORITY_TRANSACTION = IBinder::FIRST_CALL_TRANSACTION,
     REQUEST_CPUSET_BOOST,
+    REQUEST_THREAD_CPUSET,
 };
 
 // ----------------------------------------------------------------------
@@ -78,6 +79,29 @@ public:
         }
         return reply.readInt32();
     }
+
+    virtual int requestThreadCpuset(int32_t pid, int32_t tid,
+                                    int32_t group, bool asynchronous)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(ISchedulingPolicyService::getInterfaceDescriptor());
+        data.writeInt32(pid);
+        data.writeInt32(tid);
+        data.writeInt32(group);
+        uint32_t flags = asynchronous ? IBinder::FLAG_ONEWAY : 0;
+        status_t status = remote()->transact(REQUEST_THREAD_CPUSET, data, &reply, flags);
+        if (status != NO_ERROR) {
+            return status;
+        }
+        if (asynchronous) {
+            return NO_ERROR;
+        }
+        // fail on exception: force binder reconnection
+        if (reply.readExceptionCode() != 0) {
+            return DEAD_OBJECT;
+        }
+        return reply.readInt32();
+    }
 };
 
 IMPLEMENT_META_INTERFACE(SchedulingPolicyService, "android.os.ISchedulingPolicyService");
@@ -90,6 +114,7 @@ status_t BnSchedulingPolicyService::onTransact(
     switch (code) {
     case REQUEST_PRIORITY_TRANSACTION:
     case REQUEST_CPUSET_BOOST:
+    case REQUEST_THREAD_CPUSET:
         // Not reached
         return NO_ERROR;
         break;

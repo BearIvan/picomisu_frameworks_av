@@ -96,8 +96,8 @@ status_t TrackPlayerBase::playerSetVolume() {
 status_t TrackPlayerBase::doSetVolume() {
     status_t status = NO_INIT;
     if (mAudioTrack != 0) {
-        float tl = mPlayerVolumeL * mPanMultiplierL * mVolumeMultiplierL;
-        float tr = mPlayerVolumeR * mPanMultiplierR * mVolumeMultiplierR;
+        float tl = mPlayerVolumeL * mPanMultiplierL * mVolumeMultiplierL * mExtVolume;
+        float tr = mPlayerVolumeR * mPanMultiplierR * mVolumeMultiplierR * mExtVolume;
         mAudioTrack->setVolume(tl, tr);
         status = NO_ERROR;
     }
