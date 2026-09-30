@@ -31,6 +31,7 @@
 #include <binder/IPCThreadState.h>
 #include <binder/ActivityManager.h>
 #include <binder/PermissionController.h>
+#include <private/android_filesystem_config.h>
 #include <binder/IResultReceiver.h>
 #include <utils/String16.h>
 #include <utils/threads.h>
@@ -457,6 +458,11 @@ void AudioPolicyService::updateUidStates_l()
             continue;
         }
 
+        // PICO: the white listed system apps are not eligible for top active or latest active
+        if (isWhiteListApp(current->uid, current->opPackageName)) {
+            continue;
+        }
+
         app_state_t appState = apmStatFromAmState(mUidPolicy->getUidState(current->uid));
         // clients which app is in IDLE state are not eligible for top active or
         // latest active
@@ -570,6 +576,12 @@ void AudioPolicyService::updateUidStates_l()
                 }
             }
         }
+        // PICO: the white listed apps, system and root always keep capturing
+        if (isWhiteListApp(current->uid, current->opPackageName)
+                || current->uid == AID_SYSTEM || current->uid == AID_ROOT) {
+            allowCapture = true;
+        }
+        ALOGD("AudioPolicyService: allowCapture %d", allowCapture);
         setAppState_l(current->uid,
                       allowCapture ? apmStatFromAmState(mUidPolicy->getUidState(current->uid)) :
                                 APP_STATE_IDLE);
@@ -638,8 +650,115 @@ void AudioPolicyService::setAppState_l(uid_t uid, app_state_t state)
     }
     sp<IAudioFlinger> af = AudioSystem::get_audio_flinger();
     if (af) {
-        bool silenced = state == APP_STATE_IDLE;
-        af->setRecordSilenced(uid, silenced);
+        // PICO: the idle app state only silences the capture while the record thread
+        // state of AudioFlinger ("key_rtState", vendor.audio.rt.state) is set
+        if (af->getRecordThreadstate() != 0) {
+            bool silenced = state == APP_STATE_IDLE;
+            ALOGD("AudioPolicyService: setAppState_l silenced %d uid %d", silenced, uid);
+            af->setRecordSilenced(uid, silenced);
+        }
+    }
+}
+
+// PICO
+void AudioPolicyService::setRecordSilencedByName_l(uid_t sessionId, bool silenced)
+{
+    AutoCallerClear acc;
+
+    sp<IAudioFlinger> af = AudioSystem::get_audio_flinger();
+    if (af) {
+        af->setRecordSilencedBySessionId(sessionId, silenced);
+    }
+}
+
+// PICO
+String16 AudioPolicyService::getPackagesForUid(uid_t uid, const String16& defaultName)
+{
+    Vector<String16> packages;
+    PermissionController permissionController;
+    permissionController.getPackagesForUid(uid, packages);
+    if (packages.isEmpty()) {
+        ALOGE("No packages for uid %d", uid);
+        return defaultName;
+    }
+    return packages[0];
+}
+
+// PICO: system apps of PICO OS 5.13.7 that may keep capturing in the background
+static const char *kRecordWhiteList[] = {
+    "com.pvr.shortcut",
+    "com.pvr.voiceassistant",
+    "com.pvr.lanserver",
+    "com.bytedance.pico.screencapture",
+    "com.pvr.socialcinema",
+    "com.pvr.socialhome",
+    "com.sohu.inputmethod.sogou.car",
+    "com.pico.browser",
+    "pxreyetrackingservice",
+};
+
+bool AudioPolicyService::isWhiteListApp(uid_t uid, const String16& opPackageName)
+{
+    String16 packageName;
+    if (strlen(String8(opPackageName).string()) != 0) {
+        packageName.setTo(opPackageName);
+    } else {
+        packageName.setTo(getPackagesForUid(uid, packageName));
+    }
+    for (const char *whiteListApp : kRecordWhiteList) {
+        ALOGD("packagename %s.", String8(packageName).string());
+        if (strcmp(String8(packageName).string(), whiteListApp) == 0) {
+            ALOGD("find whitelist packagename %s.", String8(packageName).string());
+            return true;
+        }
+    }
+    return false;
+}
+
+// PICO: silences the capture of the clients whose package (or, for native clients, first
+// package of the uid) is packageName
+void AudioPolicyService::setRecordSilencedByName(const char *packageName, bool silenced)
+{
+    String16 name;
+    ALOGD("AudioPolicyService:setRecordSilencedByName(packageName: %s, silenced: %d)",
+          packageName, silenced);
+    Mutex::Autolock _l(mLock);
+    for (size_t i = 0; i < mAudioRecordClients.size(); i++) {
+        sp<AudioRecordClient> client = mAudioRecordClients.valueAt(i);
+        if (strlen(String8(client->opPackageName).string()) != 0) {
+            name.setTo(client->opPackageName);
+        } else {
+            name.setTo(getPackagesForUid(client->uid, name));
+        }
+        if (strcmp(String8(name).string(), packageName) != 0) {
+            continue;
+        }
+        ALOGD("AudioPolicyService:setRecordSilencedByName Find same package name in "
+              "mAudioRecordClients");
+        if (mAudioPolicyManager) {
+            mAudioPolicyManager->setRecordSilencedState(client->uid, silenced);
+        }
+        setRecordSilencedByName_l(client->session, silenced);
+    }
+}
+
+// PICO
+void AudioPolicyService::setParameters(const String8& keyValuePairs)
+{
+    if (mAudioPolicyManager == NULL) {
+        return;
+    }
+    if (mOutputCommandThread->setParametersToPolicyCommand(keyValuePairs) != NO_ERROR) {
+        ALOGE("setParametersToPolicy failed, %s", keyValuePairs.string());
+    }
+}
+
+// PICO
+void AudioPolicyService::doSetParameters(const String8& keyValuePairs)
+{
+    Mutex::Autolock _l(mLock);
+    if (mAudioPolicyManager) {
+        mAudioPolicyManager->setParameters(keyValuePairs);
     }
 }
 
@@ -1294,6 +1413,17 @@ bool AudioPolicyService::AudioCommandThread::threadLoop()
                         mLock.lock();
                     }
                     } break;
+                case SET_PARAMETERS_TO_POLICY: {
+                    // PICO
+                    ParametersData *data = (ParametersData *)command->mParam.get();
+                    svc = mService.promote();
+                    if (svc == 0) {
+                        break;
+                    }
+                    mLock.unlock();
+                    svc->doSetParameters(data->mKeyValuePairs);
+                    mLock.lock();
+                    } break;
 
                 default:
                     ALOGW("AudioCommandThread() unknown command %d", command->mCommand);
@@ -1454,6 +1584,19 @@ void AudioPolicyService::AudioCommandThread::setEffectSuspendedCommand(int effec
     sendCommand(command);
 }
 
+
+// PICO
+status_t AudioPolicyService::AudioCommandThread::setParametersToPolicyCommand(
+        const String8& keyValuePairs)
+{
+    sp<AudioCommand> command = new AudioCommand();
+    command->mCommand = SET_PARAMETERS_TO_POLICY;
+    sp<ParametersData> data = new ParametersData();
+    data->mKeyValuePairs = keyValuePairs;
+    command->mParam = data;
+    command->mWaitStatus = false;
+    return sendCommand(command);
+}
 
 void AudioPolicyService::AudioCommandThread::stopOutputCommand(audio_port_handle_t portId)
 {

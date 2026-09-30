@@ -252,11 +252,9 @@ public:
                                     Parcel* reply,
                                     uint32_t flags = 0);
 
-    // The audio policy service of this build has neither the PICO record silencing nor
-    // the spatializer: onTransact() does not dispatch the transactions 73..76 (clients get
-    // UNKNOWN_TRANSACTION) and in-process callers get these "not available" results.
-    virtual void setParameters(const String8& keyValuePairs);
-    virtual void setRecordSilencedByName(const char *packageName, bool silenced);
+    // The audio policy service of this build has no spatializer: onTransact() does not
+    // dispatch the transactions 74..76 (clients get UNKNOWN_TRANSACTION) and in-process
+    // callers get these "not available" results.
     virtual status_t getSpatializer(const sp<media::INativeSpatializerCallback>& callback,
                                     sp<media::ISpatializer>* spatializer);
     virtual status_t canBeSpatialized(const audio_attributes_t *attr,

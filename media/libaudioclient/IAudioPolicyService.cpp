@@ -1381,18 +1381,8 @@ IMPLEMENT_META_INTERFACE(AudioPolicyService, "android.media.IAudioPolicyService"
 
 // ----------------------------------------------------------------------
 
-// The audio policy service of this build has no PICO record silencing and no spatializer
-// (see IAudioPolicyService.h): the in-process results of an audio policy service without them.
-void BnAudioPolicyService::setParameters(const String8& keyValuePairs)
-{
-    ALOGW("setParameters(%s): not supported by the audio policy service", keyValuePairs.string());
-}
-
-void BnAudioPolicyService::setRecordSilencedByName(const char *packageName, bool silenced)
-{
-    ALOGW("setRecordSilencedByName(%s, %d): not supported by the audio policy service",
-          packageName, silenced);
-}
+// The audio policy service of this build has no spatializer (see IAudioPolicyService.h):
+// the in-process results of an audio policy service without it.
 
 status_t BnAudioPolicyService::getSpatializer(
         const sp<media::INativeSpatializerCallback>& callback __unused,
@@ -2498,6 +2488,18 @@ status_t BnAudioPolicyService::onTransact(
             audio_flags_mask_t flags = data.readInt32();
             status_t status = setAllowedCapturePolicy(uid, flags);
             reply->writeInt32(status);
+            return NO_ERROR;
+        }
+
+        case SET_RECORD_SILENCED_BY_NAME: {
+            // PICO
+            CHECK_INTERFACE(IAudioPolicyService, data, reply);
+            const char *packageName = data.readCString();
+            bool silenced = data.readInt32() == 1;
+            if (packageName == nullptr) {
+                return BAD_VALUE;
+            }
+            setRecordSilencedByName(packageName, silenced);
             return NO_ERROR;
         }
 

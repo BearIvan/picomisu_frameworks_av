@@ -259,6 +259,13 @@ public:
 
     virtual status_t setRttEnabled(bool enabled);
 
+    // PICO: record silencing of the clients of a package (AudioSystem::setRecordSilenced())
+    virtual void setRecordSilencedByName(const char *packageName, bool silenced);
+    // PICO: parameters for the audio policy manager (AudioSystem::setParametersToPolicy()),
+    // applied on the output command thread
+    virtual void setParameters(const String8& keyValuePairs);
+            void doSetParameters(const String8& keyValuePairs);
+
             status_t doStopOutput(audio_port_handle_t portId);
             void doReleaseOutput(audio_port_handle_t portId);
 
@@ -312,6 +319,12 @@ private:
 
     // Sets whether the given UID records only silence
     virtual void setAppState_l(uid_t uid, app_state_t state);
+    // PICO: silences the record tracks of an audio session in AudioFlinger
+    virtual void setRecordSilencedByName_l(uid_t sessionId, bool silenced);
+    // PICO: first package of a uid, defaultName if there is none
+    String16 getPackagesForUid(uid_t uid, const String16& defaultName);
+    // PICO: system apps that may keep capturing in the background
+    bool isWhiteListApp(uid_t uid, const String16& opPackageName);
 
     // Overrides the UID state as if it is idle
     status_t handleSetUidState(Vector<String16>& args, int err);
@@ -441,6 +454,11 @@ private:
             DYN_POLICY_MIX_STATE_UPDATE,
             RECORDING_CONFIGURATION_UPDATE,
             SET_EFFECT_SUSPENDED,
+            // PICO OS 5.13.7 command numbers: 15 is the check of the spatializer output
+            // (spatializer backport, not in this tree), 16 is not handled
+            CHECK_SPATIALIZER,
+            RESERVED_16,
+            SET_PARAMETERS_TO_POLICY,   // PICO
         };
 
         AudioCommandThread (String8 name, const wp<AudioPolicyService>& service);
@@ -487,6 +505,8 @@ private:
                     void        setEffectSuspendedCommand(int effectId,
                                                           audio_session_t sessionId,
                                                           bool suspended);
+                    // PICO
+                    status_t    setParametersToPolicyCommand(const String8& keyValuePairs);
                     void        insertCommand_l(AudioCommand *command, int delayMs = 0);
     private:
         class AudioCommandData;
