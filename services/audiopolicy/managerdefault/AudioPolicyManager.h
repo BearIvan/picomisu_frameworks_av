@@ -276,6 +276,10 @@ public:
                                             bool reported);
         virtual status_t setSurroundFormatEnabled(audio_format_t audioFormat, bool enabled);
 
+        // PICO
+        virtual void setParameters(const String8& keyValuePairs);
+        virtual void picoUpdateDevicesAndOutputs();
+
         virtual status_t getHwOffloadEncodingFormatsSupportedForA2DP(
                     std::vector<audio_format_t> *formats);
 
@@ -306,6 +310,9 @@ public:
             volumeGroup = mEngine->getVolumeGroupForAttributes(aa.getAttributes());
             return volumeGroup != VOLUME_GROUP_NONE ? NO_ERROR : BAD_VALUE;
         }
+
+        // PICO
+        virtual void setRecordSilencedState(uid_t uid, bool silenced);
 
 protected:
         // A constructor that allows more fine-grained control over initialization process,
@@ -693,6 +700,7 @@ protected:
         void closeActiveClients(const sp<AudioInputDescriptor>& input);
         void closeClient(audio_port_handle_t portId);
 
+        int mAudioProxy;                                // PICO: last "audioProxy" parameter (1..3)
         const uid_t mUidCached;                         // AID_AUDIOSERVER
         AudioPolicyClientInterface *mpClientInterface;  // audio policy client interface
         sp<SwAudioOutputDescriptor> mPrimaryOutput;     // primary output descriptor

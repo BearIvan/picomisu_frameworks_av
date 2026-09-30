@@ -137,6 +137,52 @@ status_t Engine::setForceUse(audio_policy_force_use_t usage, audio_policy_forced
     return EngineBase::setForceUse(usage, config);
 }
 
+// PICO: output devices of a media strategy while casting to castDevice (remote submix or
+// proxy), as selected by persist.pvr.outproxy: "target" plays on the cast device only, "sink"
+// only on the local device (A2DP, USB, wired or speaker, in this order) and any other value
+// on both. Without the property the cast device is not selected here.
+static uint32_t getPicoCastDevice(const Engine &engine, audio_devices_t castDevice,
+                                  uint32_t availableOutputDevicesType,
+                                  const SwAudioOutputCollection &outputs)
+{
+    char outProxy[PROPERTY_VALUE_MAX] = "target";
+    if (property_get("persist.pvr.outproxy", outProxy, nullptr) < 1) {
+        return AUDIO_DEVICE_NONE;
+    }
+    uint32_t devices;
+    if ((engine.getForceUse(AUDIO_POLICY_FORCE_FOR_MEDIA) != AUDIO_POLICY_FORCE_NO_BT_A2DP) &&
+            outputs.isA2dpSupported()) {
+        devices = availableOutputDevicesType & (castDevice | AUDIO_DEVICE_OUT_BLUETOOTH_A2DP);
+        if (devices == AUDIO_DEVICE_NONE) {
+            devices = availableOutputDevicesType &
+                    (castDevice | AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES);
+        }
+        if (devices == AUDIO_DEVICE_NONE) {
+            devices = availableOutputDevicesType &
+                    (castDevice | AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_SPEAKER);
+        }
+    } else if (availableOutputDevicesType &
+            (AUDIO_DEVICE_OUT_USB_HEADSET | AUDIO_DEVICE_OUT_USB_DEVICE)) {
+        devices = availableOutputDevicesType &
+                (castDevice | AUDIO_DEVICE_OUT_USB_HEADSET | AUDIO_DEVICE_OUT_USB_DEVICE);
+    } else if (availableOutputDevicesType &
+            (AUDIO_DEVICE_OUT_WIRED_HEADSET | AUDIO_DEVICE_OUT_WIRED_HEADPHONE)) {
+        devices = availableOutputDevicesType &
+                (castDevice | AUDIO_DEVICE_OUT_WIRED_HEADSET | AUDIO_DEVICE_OUT_WIRED_HEADPHONE);
+    } else {
+        devices = availableOutputDevicesType & (castDevice | AUDIO_DEVICE_OUT_SPEAKER);
+    }
+    if (strcmp(outProxy, "target") == 0) {
+        return availableOutputDevicesType & castDevice;
+    }
+    if (strcmp(outProxy, "sink") == 0) {
+        return devices & (AUDIO_DEVICE_OUT_SPEAKER | AUDIO_DEVICE_OUT_WIRED_HEADSET |
+                AUDIO_DEVICE_OUT_WIRED_HEADPHONE | AUDIO_DEVICE_OUT_ALL_A2DP |
+                AUDIO_DEVICE_OUT_USB_DEVICE | AUDIO_DEVICE_OUT_USB_HEADSET);
+    }
+    return devices;
+}
+
 audio_devices_t Engine::getDeviceForStrategyInt(legacy_strategy strategy,
                                                 DeviceVector availableOutputDevices,
                                                 DeviceVector availableInputDevices,
@@ -413,9 +459,36 @@ audio_devices_t Engine::getDeviceForStrategyInt(legacy_strategy strategy,
 
         if (strategy != STRATEGY_SONIFICATION) {
             // no sonification on remote submix (e.g. WFD)
+            // PICO: the screen recorder (pvr.screen.action=record) and the casting services
+            // (remote submix: "lebo", proxy: "miracast") keep a local device next to the cast
+            // device; persist.pvr.outproxy selects "target" (cast device only), "sink" (local
+            // device only) or both.
             if (availableOutputDevices.getDevice(AUDIO_DEVICE_OUT_REMOTE_SUBMIX,
                                                  String8("0"), AUDIO_FORMAT_DEFAULT) != 0) {
-                device2 = availableOutputDevices.types() & AUDIO_DEVICE_OUT_REMOTE_SUBMIX;
+                char screenAction[PROPERTY_VALUE_MAX];
+                property_get("pvr.screen.action", screenAction, nullptr);
+                if (strcmp(screenAction, "record") == 0) {
+                    if (availableOutputDevicesType &
+                            (AUDIO_DEVICE_OUT_WIRED_HEADSET | AUDIO_DEVICE_OUT_WIRED_HEADPHONE)) {
+                        device2 = availableOutputDevicesType & (AUDIO_DEVICE_OUT_REMOTE_SUBMIX |
+                                AUDIO_DEVICE_OUT_WIRED_HEADSET | AUDIO_DEVICE_OUT_WIRED_HEADPHONE);
+                    } else {
+                        device2 = availableOutputDevicesType &
+                                (AUDIO_DEVICE_OUT_REMOTE_SUBMIX | AUDIO_DEVICE_OUT_SPEAKER);
+                    }
+                    ALOGI("getDeviceForStrategy() strategy %d, availableOutputDevicesType 0x%x,"
+                          "device2 0x%x, record", strategy, availableOutputDevicesType, device2);
+                } else {
+                    device2 = getPicoCastDevice(AUDIO_DEVICE_OUT_REMOTE_SUBMIX,
+                                                availableOutputDevicesType, outputs);
+                    ALOGI("getDeviceForStrategy() strategy %d, availableOutputDevicesType 0x%x, "
+                          "device2 0x%x, lebo", strategy, availableOutputDevicesType, device2);
+                }
+            } else if (availableOutputDevicesType & AUDIO_DEVICE_OUT_PROXY) {
+                device2 = getPicoCastDevice(AUDIO_DEVICE_OUT_PROXY,
+                                            availableOutputDevicesType, outputs);
+                ALOGI("getDeviceForStrategy() strategy %d, availableOutputDevicesType 0x%x, "
+                      "device2 0x%x, miracast", strategy, availableOutputDevicesType, device2);
             }
         }
         if (isInCall() && (strategy == STRATEGY_MEDIA)) {
@@ -474,11 +547,8 @@ audio_devices_t Engine::getDeviceForStrategyInt(legacy_strategy strategy,
                 (getForceUse(AUDIO_POLICY_FORCE_FOR_DOCK) == AUDIO_POLICY_FORCE_ANALOG_DOCK)) {
             device2 = availableOutputDevicesType & AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET;
         }
-        if ((device2 == AUDIO_DEVICE_NONE) && (strategy != STRATEGY_SONIFICATION) &&
-                (device == AUDIO_DEVICE_NONE)) {
-            // no sonification on WFD sink
-            device2 = availableOutputDevicesType & AUDIO_DEVICE_OUT_PROXY;
-        }
+        // PICO: no fallback to the WFD sink (AUDIO_DEVICE_OUT_PROXY) here, the proxy is only
+        // selected by the "miracast" rule above.
         if (device2 == AUDIO_DEVICE_NONE) {
             device2 = availableOutputDevicesType & AUDIO_DEVICE_OUT_SPEAKER;
         }

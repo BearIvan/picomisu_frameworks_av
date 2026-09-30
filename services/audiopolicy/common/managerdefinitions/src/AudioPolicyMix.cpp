@@ -24,6 +24,7 @@
 #include "IOProfile.h"
 #include "AudioGain.h"
 #include <AudioOutputDescriptor.h>
+#include <cutils/properties.h>
 
 namespace android {
 
@@ -205,6 +206,13 @@ status_t AudioPolicyMixCollection::getOutputForAttr(
     return NO_ERROR;
 }
 
+// PICO: the system screen recorder sets pvr.screen.action to "record" while it records.
+static bool isPicoScreenRecording()
+{
+    char value[PROPERTY_VALUE_MAX] = {};
+    return property_get("pvr.screen.action", value, nullptr) > 0 && strcmp(value, "record") == 0;
+}
+
 AudioPolicyMixCollection::MixMatchStatus AudioPolicyMixCollection::mixMatch(
         const AudioMix* mix, size_t mixIndex, const audio_attributes_t& attributes, uid_t uid) {
 
@@ -216,13 +224,17 @@ AudioPolicyMixCollection::MixMatchStatus AudioPolicyMixCollection::mixMatch(
             if (hasFlag(attributes.flags, AUDIO_FLAG_NO_SYSTEM_CAPTURE)) {
                 return MixMatchStatus::NO_MATCH;
             }
+            // PICO: while the system screen recorder runs, it also captures players that
+            // opted out of media projection and all usages.
             if (!mix->mAllowPrivilegedPlaybackCapture &&
-                hasFlag(attributes.flags, AUDIO_FLAG_NO_MEDIA_PROJECTION)) {
+                hasFlag(attributes.flags, AUDIO_FLAG_NO_MEDIA_PROJECTION) &&
+                !isPicoScreenRecording()) {
                 return MixMatchStatus::NO_MATCH;
             }
             if (!(attributes.usage == AUDIO_USAGE_UNKNOWN ||
                   attributes.usage == AUDIO_USAGE_MEDIA ||
-                  attributes.usage == AUDIO_USAGE_GAME)) {
+                  attributes.usage == AUDIO_USAGE_GAME) &&
+                !isPicoScreenRecording()) {
                 return MixMatchStatus::NO_MATCH;
             }
         }

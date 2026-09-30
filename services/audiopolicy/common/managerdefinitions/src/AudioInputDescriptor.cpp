@@ -345,7 +345,8 @@ void AudioInputDescriptor::setClientActive(const sp<RecordClientDescriptor>& cli
 void AudioInputDescriptor::updateClientRecordingConfiguration(
     int event, const sp<RecordClientDescriptor>& client)
 {
-    ALOGV("%s riid %d uid %d port %d session %d event %d",
+    // PICO: logged at debug level
+    ALOGD("%s riid %d uid %d port %d session %d event %d",
             __func__, client->riid(), client->uid(), client->portId(), client->session(), event);
     // do not send callback if starting and no device is selected yet to avoid
     // double callbacks from startInput() before and after the device is selected
@@ -357,9 +358,12 @@ void AudioInputDescriptor::updateClientRecordingConfiguration(
     }
 
     const audio_config_base_t sessionConfig = client->config();
+    ALOGD("%s recordClientInfo ", __func__);
+    // PICO: the recording configurations report the package based record silencing
+    // (setRecordSilencedState()) instead of the idle app state.
     const record_client_info_t recordClientInfo{client->riid(), client->uid(), client->session(),
                                                 client->source(), client->portId(),
-                                                client->isSilenced()};
+                                                client->isRecordSilenced()};
     const audio_config_base_t config = getConfig();
 
     std::vector<effect_descriptor_t> clientEffects;
@@ -469,6 +473,30 @@ void AudioInputDescriptor::setAppState(uid_t uid, app_state_t state)
     checkSuspendEffects();
 
     for (const auto& client : updatedClients) {
+        updateClientRecordingConfiguration(RECORD_CONFIG_EVENT_UPDATE, client);
+    }
+}
+
+void AudioInputDescriptor::setRecordSilencedState(uid_t uid, bool silenced)
+{
+    RecordClientVector clients = clientsList(false /*activeOnly*/);
+    RecordClientVector updatedClients;
+
+    ALOGD("%s setRecordSilencedState uid %d state %d", __func__, uid, silenced);
+    for (const auto& client : clients) {
+        ALOGD("%s setRecordSilencedState now uid %d ", __func__, client->uid());
+        if (uid == client->uid()) {
+            ALOGD("%s setRecordSilencedState find uid %d state %d", __func__, client->uid(),
+                  silenced);
+            client->setRecordSilenced(silenced);
+            if (client->active()) {
+                updatedClients.push_back(client);
+            }
+        }
+    }
+
+    for (const auto& client : updatedClients) {
+        ALOGD("%s updatedClients now uid %d ", __func__, client->uid());
         updateClientRecordingConfiguration(RECORD_CONFIG_EVENT_UPDATE, client);
     }
 }

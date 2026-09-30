@@ -98,6 +98,8 @@ public:
         audio_source_t source = AUDIO_SOURCE_DEFAULT, bool preferredDeviceOnly = false) const;
 
     void setAppState(uid_t uid, app_state_t state);
+    // PICO: package based record silencing (AudioPolicyManager::setRecordSilencedState()).
+    void setRecordSilencedState(uid_t uid, bool silenced);
 
     // implementation of ClientMapHandler<RecordClientDescriptor>
     void addClient(const sp<RecordClientDescriptor> &client) override;

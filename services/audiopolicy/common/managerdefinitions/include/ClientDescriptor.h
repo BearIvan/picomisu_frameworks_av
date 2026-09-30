@@ -153,7 +153,7 @@ public:
                         audio_source_t source, audio_input_flags_t flags, bool isSoundTrigger) :
         ClientDescriptor(portId, uid, sessionId, attributes, config, preferredDeviceId),
         mRIId(riid), mSource(source), mFlags(flags), mIsSoundTrigger(isSoundTrigger),
-        mAppState(APP_STATE_IDLE) {}
+        mAppState(APP_STATE_IDLE), mRecordSilenced(false) {}
     ~RecordClientDescriptor() override = default;
 
     using ClientDescriptor::dump;
@@ -167,6 +167,9 @@ public:
     void setAppState(app_state_t appState) { mAppState = appState; }
     app_state_t appState() { return mAppState; }
     bool isSilenced() const { return mAppState == APP_STATE_IDLE; }
+    // PICO: silenced by AudioSystem::setRecordSilenced() (package based record silencing).
+    void setRecordSilenced(bool silenced) { mRecordSilenced = silenced; }
+    bool isRecordSilenced() const { return mRecordSilenced; }
     void trackEffectEnabled(const sp<EffectDescriptor> &effect, bool enabled);
     EffectDescriptorCollection getEnabledEffects() const { return mEnabledEffects; }
 
@@ -176,6 +179,7 @@ private:
     const audio_input_flags_t mFlags;
     const bool mIsSoundTrigger;
           app_state_t mAppState;
+          bool mRecordSilenced;   // PICO
     EffectDescriptorCollection mEnabledEffects;
 };
 

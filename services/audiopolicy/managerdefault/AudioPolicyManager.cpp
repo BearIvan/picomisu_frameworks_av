@@ -4188,6 +4188,77 @@ void AudioPolicyManager::setAppState(uid_t uid, app_state_t state)
     }
 }
 
+// PICO: package based record silencing, see AudioPolicyService::setRecordSilencedByName().
+void AudioPolicyManager::setRecordSilencedState(uid_t uid, bool silenced)
+{
+    ALOGD("%s(uid:%d, RecordSilencedState :%d size %zu)", __func__, uid, silenced,
+          mInputs.size());
+    for (size_t i = 0; i < mInputs.size(); i++) {
+        mInputs.valueAt(i)->setRecordSilencedState(uid, silenced);
+    }
+}
+
+// PICO: after a change of the cast routing rules (persist.pvr.outproxy, see
+// Engine::getDeviceForStrategyInt()), move the active outputs to their new devices. The
+// streams of a duplicated output are invalidated instead, so that their tracks are recreated
+// on the right output.
+void AudioPolicyManager::picoUpdateDevicesAndOutputs()
+{
+    ALOGD("%s, in : ", __func__);
+    checkA2dpSuspend();
+    checkOutputForAllStrategies();
+    updateDevicesAndOutputs();
+
+    std::set<audio_stream_type_t> streamsToInvalidate;
+    for (size_t i = 0; i < mOutputs.size(); i++) {
+        sp<SwAudioOutputDescriptor> outputDesc = mOutputs.valueAt(i);
+        if (!outputDesc->isActive(0)) {
+            continue;
+        }
+        DeviceVector newDevices = getNewOutputDevices(outputDesc, true /*fromCache*/);
+        DeviceVector prevDevices = outputDesc->devices();
+        ALOGD("%s: newDevices %s, prevDevices %s", __func__,
+              newDevices.toString().c_str(), prevDevices.toString().c_str());
+        if (newDevices == prevDevices) {
+            continue;
+        }
+        if (outputDesc->isDuplicated()) {
+            for (const auto& client : outputDesc->getClientIterable()) {
+                streamsToInvalidate.insert(client->stream());
+            }
+        } else {
+            ALOGD("%s, setOutputDevices in ", __func__);
+            setOutputDevices(outputDesc, newDevices, !newDevices.isEmpty() /*force*/,
+                             0 /*delayMs*/, nullptr /*patchHandle*/,
+                             true /*requiresMuteCheck*/);
+        }
+    }
+    for (audio_stream_type_t stream : streamsToInvalidate) {
+        ALOGD("%s: invalidate stream %d due to duplicated output change", __func__, stream);
+        mpClientInterface->invalidateStream(stream);
+    }
+    ALOGD("%s, end : ", __func__);
+}
+
+// PICO: "audioProxy=<1..3>" from AudioFlinger::setParameters() (AudioSystem::
+// setParametersToPolicy()); a change re-routes the active outputs.
+void AudioPolicyManager::setParameters(const String8& keyValuePairs)
+{
+    AudioParameter param = AudioParameter(keyValuePairs);
+    ALOGD("%s, parameters : %s", __func__, keyValuePairs.string());
+    if (strstr(keyValuePairs.string(), "audioProxy") != nullptr) {
+        int audioProxy;
+        if (param.getInt(String8("audioProxy"), audioProxy) == NO_ERROR &&
+                audioProxy >= 1 && audioProxy <= 3) {
+            const int prevAudioProxy = mAudioProxy;
+            mAudioProxy = audioProxy;
+            if (audioProxy != prevAudioProxy) {
+                picoUpdateDevicesAndOutputs();
+            }
+        }
+    }
+}
+
 bool AudioPolicyManager::isHapticPlaybackSupported()
 {
     for (const auto& hwModule : mHwModules) {
@@ -4304,6 +4375,7 @@ static status_t deserializeAudioPolicyXmlConfig(AudioPolicyConfig &config) {
 AudioPolicyManager::AudioPolicyManager(AudioPolicyClientInterface *clientInterface,
                                        bool /*forTesting*/)
     :
+    mAudioProxy(0),
     mUidCached(AID_AUDIOSERVER), // no need to call getuid(), there's only one of us running.
     mpClientInterface(clientInterface),
     mLimitRingtoneVolume(false), mLastVoiceVolume(-1.0f),

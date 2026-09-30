@@ -253,6 +253,12 @@ public:
                                         bool reported) = 0;
     virtual status_t setSurroundFormatEnabled(audio_format_t audioFormat, bool enabled) = 0;
 
+    // PICO: key/value parameters forwarded by AudioFlinger::setParameters() through
+    // AudioSystem::setParametersToPolicy() ("audioProxy").
+    virtual void     setParameters(const String8& keyValuePairs) = 0;
+    // PICO: re-evaluates the devices of all active outputs after a routing rule change.
+    virtual void     picoUpdateDevicesAndOutputs() = 0;
+
     virtual bool     isHapticPlaybackSupported() = 0;
 
     virtual status_t getHwOffloadEncodingFormatsSupportedForA2DP(
@@ -269,6 +275,10 @@ public:
 
     virtual status_t getVolumeGroupFromAudioAttributes(const AudioAttributes &aa,
                                                        volume_group_t &volumeGroup) = 0;
+
+    // PICO: record silencing of all the clients of a uid (AudioSystem::setRecordSilenced()),
+    // reported in the recording configurations.
+    virtual void     setRecordSilencedState(uid_t uid, bool silenced) = 0;
 };
 
 
