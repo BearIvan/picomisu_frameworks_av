@@ -1,0 +1,39 @@
+// Copyright 2026 Picomisu contributors
+// SPDX-License-Identifier: Apache-2.0
+
+// PICO OS 5.13.7 libspatialaudio: per-player spatial audio controls (orientation, pose,
+// spatialization) on top of the spatializer of the audio policy service, used by the
+// android.media.PlayerSpatialHelperImpl JNI of libmedia_jni. Same soname, exports and
+// NEEDED libraries as the factory /system/lib{,64}/libspatialaudio.so.
+cc_library_shared {
+    name: "libspatialaudio",
+
+    srcs: [
+        "SpatialAudio.cpp",
+        "Spatializer.cpp",
+        "SpatialCoordConverter.cpp",
+    ],
+
+    export_include_dirs: ["include"],
+
+    header_libs: ["libeigen"],
+    export_header_lib_headers: ["libeigen"],
+
+    shared_libs: [
+        "libaudioclient",
+        "libbinder",
+        "liblog",
+        "libutils",
+    ],
+
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+
+    sanitize: {
+        integer_overflow: true,
+        // The factory library is built without CFI (no __cfi_check, weak template exports).
+        cfi: false,
+    },
+}

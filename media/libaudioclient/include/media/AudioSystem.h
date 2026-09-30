@@ -19,6 +19,7 @@
 
 #include <sys/types.h>
 
+#include <media/AudioDeviceTypeAddrForSpatial.h>
 #include <media/AudioPolicy.h>
 #include <media/AudioProductStrategy.h>
 #include <media/AudioVolumeGroup.h>
@@ -45,10 +46,17 @@ typedef void (*record_config_callback)(int event,
                                        std::vector<effect_descriptor_t> effects,
                                        audio_patch_handle_t patchHandle,
                                        audio_source_t source);
+// PICO: called after (re)connecting to AudioFlinger, e.g. when the audio server restarted.
+typedef void (*af_connected_callback)();
 
 class IAudioFlinger;
 class IAudioPolicyService;
 class String8;
+
+namespace media {
+class INativeSpatializerCallback;
+class ISpatializer;
+}
 
 class AudioSystem
 {
@@ -396,6 +404,32 @@ public:
 
     static status_t setRttEnabled(bool enabled);
 
+    // PICO OS 5.13.7: per-package record silencing and the Android 13 spatializer backport
+    // (IAudioPolicyService transactions 73..75).
+    static status_t setRecordSilenced(const char *packageName, bool silenced);
+
+    /**
+     * Get the ISpatializer interface from the audio policy service.
+     * @param callback the callback to receive state updates if the ISpatializer is returned.
+     * @param spatializer pointer to the returned ISpatializer (nullptr without a spatializer).
+     * @return NO_ERROR, BAD_VALUE if spatializer is nullptr or PERMISSION_DENIED without
+     *         audio policy service.
+     */
+    static status_t getSpatializer(const sp<media::INativeSpatializerCallback>& callback,
+                                   sp<media::ISpatializer>* spatializer);
+
+    /**
+     * Queries if some kind of spatialization will be performed if the audio playback context
+     * described by the provided arguments is present.
+     */
+    static status_t canBeSpatialized(const audio_attributes_t *attr,
+                                     const audio_config_t *config,
+                                     const AudioDeviceTypeAddrForSpatialVector &devices,
+                                     bool *canBeSpatialized);
+
+    // PICO: callback invoked after connecting to a (restarted) AudioFlinger.
+    static void setAfConnectedCallback(af_connected_callback cb);
+
     // ----------------------------------------------------------------------------
 
     class AudioVolumeGroupCallback : public RefBase
@@ -551,6 +585,7 @@ private:
     static audio_error_callback gAudioErrorCallback;
     static dynamic_policy_callback gDynPolicyCallback;
     static record_config_callback gRecordConfigCallback;
+    static af_connected_callback gAfConnectedCallback;
 
     static size_t gInBuffSize;
     // previous parameters for recording buffer size queries

@@ -22,6 +22,8 @@
 #include <math.h>
 #include <sys/types.h>
 
+#include <android/media/INativeSpatializerCallback.h>
+#include <android/media/ISpatializer.h>
 #include <binder/IPCThreadState.h>
 #include <binder/Parcel.h>
 #include <media/AudioEffect.h>
@@ -104,7 +106,12 @@ enum {
     GET_VOLUME_GROUP_FOR_ATTRIBUTES,
     SET_ALLOWED_CAPTURE_POLICY,
     MOVE_EFFECTS_TO_IO,
-    SET_RTT_ENABLED
+    SET_RTT_ENABLED,
+    // PICO OS 5.13.7 (factory codes 73..76)
+    SET_RECORD_SILENCED_BY_NAME,
+    GET_SPATIALIZER,
+    CAN_BE_SPATIALIZED,
+    GET_SPATIALIZER_SERVICE,
 };
 
 #define MAX_ITEMS_PER_LIST 1024
@@ -1284,9 +1291,114 @@ public:
         }
         return static_cast<status_t>(reply.readInt32());
     }
+
+    virtual void setRecordSilencedByName(const char *packageName, bool silenced)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioPolicyService::getInterfaceDescriptor());
+        data.writeCString(packageName);
+        data.writeInt32(static_cast<int32_t>(silenced));
+        remote()->transact(SET_RECORD_SILENCED_BY_NAME, data, &reply);
+    }
+
+    virtual status_t getSpatializer(const sp<media::INativeSpatializerCallback>& callback,
+                                    sp<media::ISpatializer>* spatializer)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioPolicyService::getInterfaceDescriptor());
+        data.writeStrongBinder(IInterface::asBinder(callback));
+        status_t status = remote()->transact(GET_SPATIALIZER, data, &reply);
+        if (status != NO_ERROR) {
+            return status;
+        }
+        status = static_cast<status_t>(reply.readInt32());
+        if (status != NO_ERROR) {
+            return status;
+        }
+        *spatializer = interface_cast<media::ISpatializer>(reply.readStrongBinder());
+        return NO_ERROR;
+    }
+
+    virtual status_t canBeSpatialized(const audio_attributes_t *attr,
+                                      const audio_config_t *config,
+                                      const AudioDeviceTypeAddrForSpatialVector &devices,
+                                      bool *canBeSpatialized)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioPolicyService::getInterfaceDescriptor());
+        data.write(attr, sizeof(audio_attributes_t));
+        data.write(config, sizeof(audio_config_t));
+        size_t sizePosition = data.dataPosition();
+        data.writeInt32(static_cast<int32_t>(devices.size()));
+        size_t count = devices.size();
+        for (size_t i = 0; i < devices.size(); i++) {
+            size_t position = data.dataPosition();
+            if (devices[i].writeToParcel(&data) != NO_ERROR) {
+                data.setDataPosition(position);
+                count--;
+            }
+        }
+        if (count != devices.size()) {
+            size_t position = data.dataPosition();
+            data.setDataPosition(sizePosition);
+            data.writeInt32(static_cast<int32_t>(count));
+            data.setDataPosition(position);
+        }
+        status_t status = remote()->transact(CAN_BE_SPATIALIZED, data, &reply);
+        if (status != NO_ERROR) {
+            return status;
+        }
+        status = static_cast<status_t>(reply.readInt32());
+        if (status == NO_ERROR) {
+            *canBeSpatialized = reply.readInt32() != 0;
+        }
+        return status;
+    }
+
+    virtual sp<media::ISpatializer> getSpatializer()
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioPolicyService::getInterfaceDescriptor());
+        status_t status = remote()->transact(GET_SPATIALIZER_SERVICE, data, &reply);
+        if (status != NO_ERROR) {
+            return nullptr;
+        }
+        return interface_cast<media::ISpatializer>(reply.readStrongBinder());
+    }
 };
 
 IMPLEMENT_META_INTERFACE(AudioPolicyService, "android.media.IAudioPolicyService");
+
+// ----------------------------------------------------------------------
+
+// The audio policy service of this build has no PICO record silencing and no spatializer
+// (see IAudioPolicyService.h): the in-process results of an audio policy service without them.
+void BnAudioPolicyService::setRecordSilencedByName(const char *packageName, bool silenced)
+{
+    ALOGW("setRecordSilencedByName(%s, %d): not supported by the audio policy service",
+          packageName, silenced);
+}
+
+status_t BnAudioPolicyService::getSpatializer(
+        const sp<media::INativeSpatializerCallback>& callback __unused,
+        sp<media::ISpatializer>* spatializer)
+{
+    *spatializer = nullptr;
+    return INVALID_OPERATION;
+}
+
+status_t BnAudioPolicyService::canBeSpatialized(
+        const audio_attributes_t *attr __unused, const audio_config_t *config __unused,
+        const AudioDeviceTypeAddrForSpatialVector &devices __unused, bool *canBeSpatialized)
+{
+    *canBeSpatialized = false;
+    return INVALID_OPERATION;
+}
+
+sp<media::ISpatializer> BnAudioPolicyService::getSpatializer()
+{
+    return nullptr;
+}
 
 // ----------------------------------------------------------------------
 

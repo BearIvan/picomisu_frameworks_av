@@ -18,6 +18,8 @@
 //#define LOG_NDEBUG 0
 
 #include <utils/Log.h>
+#include <android/media/INativeSpatializerCallback.h>
+#include <android/media/ISpatializer.h>
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
 #include <binder/IPCThreadState.h>
@@ -42,6 +44,7 @@ sp<AudioSystem::AudioFlingerClient> AudioSystem::gAudioFlingerClient;
 audio_error_callback AudioSystem::gAudioErrorCallback = NULL;
 dynamic_policy_callback AudioSystem::gDynPolicyCallback = NULL;
 record_config_callback AudioSystem::gRecordConfigCallback = NULL;
+af_connected_callback AudioSystem::gAfConnectedCallback = NULL;
 
 // establish binder interface to AudioFlinger service
 const sp<IAudioFlinger> AudioSystem::get_audio_flinger()
@@ -80,6 +83,15 @@ const sp<IAudioFlinger> AudioSystem::get_audio_flinger()
         int64_t token = IPCThreadState::self()->clearCallingIdentity();
         af->registerClient(afc);
         IPCThreadState::self()->restoreCallingIdentity(token);
+        // PICO: notify the (re)connection to AudioFlinger, e.g. to libspatialaudio
+        af_connected_callback cb = NULL;
+        {
+            Mutex::Autolock _l(gLock);
+            cb = gAfConnectedCallback;
+        }
+        if (cb != NULL) {
+            cb();
+        }
     }
     return af;
 }
@@ -733,6 +745,14 @@ status_t AudioSystem::AudioFlingerClient::removeAudioDeviceCallback(
 {
     Mutex::Autolock _l(gLock);
     gRecordConfigCallback = cb;
+}
+
+/*static*/ void AudioSystem::setAfConnectedCallback(af_connected_callback cb)
+{
+    Mutex::Autolock _l(gLock);
+    if (gAfConnectedCallback != cb) {
+        gAfConnectedCallback = cb;
+    }
 }
 
 // client singleton for AudioPolicyService binder interface
@@ -1517,6 +1537,43 @@ status_t AudioSystem::setRttEnabled(bool enabled)
     const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
     if (aps == 0) return PERMISSION_DENIED;
     return aps->setRttEnabled(enabled);
+}
+
+status_t AudioSystem::setRecordSilenced(const char *packageName, bool silenced)
+{
+    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+    aps->setRecordSilencedByName(packageName, silenced);
+    return NO_ERROR;
+}
+
+status_t AudioSystem::getSpatializer(const sp<media::INativeSpatializerCallback>& callback,
+                                     sp<media::ISpatializer>* spatializer)
+{
+    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
+    if (spatializer == nullptr) {
+        return BAD_VALUE;
+    }
+    if (aps == 0) {
+        return PERMISSION_DENIED;
+    }
+    aps->getSpatializer(callback, spatializer);
+    return NO_ERROR;
+}
+
+status_t AudioSystem::canBeSpatialized(const audio_attributes_t *attr,
+                                       const audio_config_t *config,
+                                       const AudioDeviceTypeAddrForSpatialVector &devices,
+                                       bool *canBeSpatialized)
+{
+    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
+    if (aps == 0) {
+        return PERMISSION_DENIED;
+    }
+    audio_attributes_t attributes = attr != nullptr ? *attr : AUDIO_ATTRIBUTES_INITIALIZER;
+    audio_config_t configuration = config != nullptr ? *config : AUDIO_CONFIG_INITIALIZER;
+    aps->canBeSpatialized(&attributes, &configuration, devices, canBeSpatialized);
+    return NO_ERROR;
 }
 
 // ---------------------------------------------------------------------------

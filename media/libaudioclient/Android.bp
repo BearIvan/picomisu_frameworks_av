@@ -61,6 +61,7 @@ cc_library_shared {
         "PlayerBase.cpp",
         "RecordingActivityTracker.cpp",
         "TrackPlayerBase.cpp",
+        "AudioDeviceTypeAddrForSpatial.cpp",
     ],
     shared_libs: [
         "libaudioutils",
@@ -111,5 +112,13 @@ filegroup {
     name: "libaudioclient_aidl",
     srcs: [
         "aidl/android/media/IPlayer.aidl",
+        // PICO: Android 13 spatializer backport (native client of the audio policy
+        // service spatializer, and the framework.jar AudioService/Spatializer)
+        "aidl/android/media/INativeSpatializerCallback.aidl",
+        "aidl/android/media/ISpatializer.aidl",
+        "aidl/android/media/ISpatializerHeadTrackingCallback.aidl",
+        "aidl/android/media/SpatializationLevel.aidl",
+        "aidl/android/media/SpatializationMode.aidl",
+        "aidl/android/media/SpatializerHeadTrackingMode.aidl",
     ],
 }

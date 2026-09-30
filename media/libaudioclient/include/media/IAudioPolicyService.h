@@ -222,6 +222,19 @@ public:
                                                        volume_group_t &volumeGroup) = 0;
 
     virtual status_t setRttEnabled(bool enabled) = 0;
+
+    // PICO OS 5.13.7 additions (factory vtable order and transaction codes 73..76):
+    // per-package record silencing and the Android 13 spatializer backport.
+    virtual void setRecordSilencedByName(const char *packageName, bool silenced) = 0;
+    virtual status_t getSpatializer(const sp<media::INativeSpatializerCallback>& callback,
+                                    sp<media::ISpatializer>* spatializer) = 0;
+    virtual status_t canBeSpatialized(const audio_attributes_t *attr,
+                                      const audio_config_t *config,
+                                      const AudioDeviceTypeAddrForSpatialVector &devices,
+                                      bool *canBeSpatialized) = 0;
+    // PICO: the spatializer of the audio policy service, without taking ownership
+    // (used by libspatialaudio for the per-player spatial audio controls).
+    virtual sp<media::ISpatializer> getSpatializer() = 0;
 };
 
 
@@ -234,6 +247,18 @@ public:
                                     const Parcel& data,
                                     Parcel* reply,
                                     uint32_t flags = 0);
+
+    // The audio policy service of this build has neither the PICO record silencing nor
+    // the spatializer: onTransact() does not dispatch the transactions 73..76 (clients get
+    // UNKNOWN_TRANSACTION) and in-process callers get these "not available" results.
+    virtual void setRecordSilencedByName(const char *packageName, bool silenced);
+    virtual status_t getSpatializer(const sp<media::INativeSpatializerCallback>& callback,
+                                    sp<media::ISpatializer>* spatializer);
+    virtual status_t canBeSpatialized(const audio_attributes_t *attr,
+                                      const audio_config_t *config,
+                                      const AudioDeviceTypeAddrForSpatialVector &devices,
+                                      bool *canBeSpatialized);
+    virtual sp<media::ISpatializer> getSpatializer();
 private:
     void sanetizeAudioAttributes(audio_attributes_t* attr);
     status_t sanitizeEffectDescriptor(effect_descriptor_t* desc);
