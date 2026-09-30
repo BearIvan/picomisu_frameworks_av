@@ -342,6 +342,27 @@ audio_devices_t Engine::getDeviceForStrategyInt(legacy_strategy strategy,
             device = availableOutputDevicesType & AUDIO_DEVICE_OUT_SPEAKER;
             break;
         }
+        // PICO: during a call the cast device (remote submix "0", else the proxy) replaces
+        // ("target") or joins ("sink_target") the call device, see persist.pvr.outproxy
+        if (isInCall()) {
+            char outProxy[PROPERTY_VALUE_MAX];
+            if (property_get("persist.pvr.outproxy", outProxy, nullptr) > 0) {
+                if (availableOutputDevices.getDevice(AUDIO_DEVICE_OUT_REMOTE_SUBMIX,
+                                                     String8("0"), AUDIO_FORMAT_DEFAULT) != 0) {
+                    if (strcmp(outProxy, "target") == 0) {
+                        device = AUDIO_DEVICE_OUT_REMOTE_SUBMIX;
+                    } else if (strcmp(outProxy, "sink_target") == 0) {
+                        device |= AUDIO_DEVICE_OUT_REMOTE_SUBMIX;
+                    }
+                } else if (availableOutputDevicesType & AUDIO_DEVICE_OUT_PROXY) {
+                    if (strcmp(outProxy, "target") == 0) {
+                        device = AUDIO_DEVICE_OUT_PROXY;
+                    } else if (strcmp(outProxy, "sink_target") == 0) {
+                        device |= AUDIO_DEVICE_OUT_PROXY;
+                    }
+                }
+            }
+        }
     break;
 
     case STRATEGY_SONIFICATION:
@@ -592,6 +613,18 @@ audio_devices_t Engine::getDeviceForStrategyInt(legacy_strategy strategy,
         device = getApmObserver()->getDefaultOutputDevice()->type();
         ALOGE_IF(device == AUDIO_DEVICE_NONE,
                  "getDeviceForStrategy() no default device defined");
+    }
+    // PICO: HDMI (AUX_DIGITAL) cast: "sink" keeps the speaker only, "sink_target" plays on both
+    if (device == AUDIO_DEVICE_OUT_AUX_DIGITAL) {
+        char outProxy[PROPERTY_VALUE_MAX];
+        if (property_get("persist.pvr.outproxy", outProxy, nullptr) > 0) {
+            if (strcmp(outProxy, "sink") == 0) {
+                device = availableOutputDevicesType & AUDIO_DEVICE_OUT_SPEAKER;
+            } else if (strcmp(outProxy, "sink_target") == 0) {
+                device = availableOutputDevicesType &
+                        (AUDIO_DEVICE_OUT_AUX_DIGITAL | AUDIO_DEVICE_OUT_SPEAKER);
+            }
+        }
     }
     ALOGVV("getDeviceForStrategy() strategy %d, device %x", strategy, device);
     return device;
