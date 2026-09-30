@@ -20,6 +20,8 @@
 #include "include/FrameDecoder.h"
 #include <binder/MemoryBase.h>
 #include <binder/MemoryHeapBase.h>
+#include <gui/BufferQueue.h>
+#include <gui/IConsumerListener.h>
 #include <gui/Surface.h>
 #include <inttypes.h>
 #include <media/ICrypto.h>
@@ -41,6 +43,19 @@ namespace android {
 
 static const int64_t kBufferTimeOutUs = 10000LL; // 10 msec
 static const size_t kRetryCount = 50; // must be >0
+
+// PICO: VR type reported by the decoder in the output buffer flags
+// (passed through from the OMX buffer flags by ACodecBufferChannel).
+static const uint32_t kVRTypeValidFlag = 0x40000000;
+static const uint32_t kVRTypeShift = 24;
+static const uint32_t kVRTypeMask = 0x3f;
+
+// PICO: consumer of the dummy output surface used for VR type detection.
+struct DummyConsumer : public BnConsumerListener {
+    void onFrameAvailable(const BufferItem& /* item */) override {}
+    void onBuffersReleased() override {}
+    void onSidebandStreamChanged() override {}
+};
 
 sp<IMemory> allocVideoFrame(const sp<MetaData>& trackMeta,
         int32_t width, int32_t height, int32_t tileWidth, int32_t tileHeight,
@@ -179,6 +194,8 @@ FrameDecoder::FrameDecoder(
         const sp<MetaData> &trackMeta,
         const sp<IMediaSource> &source)
     : mIDRSent(false),
+      mVRType(-1),
+      mSyncVRTypeDetect(false),
       mComponentName(componentName),
       mTrackMeta(trackMeta),
       mSource(source),
@@ -196,10 +213,22 @@ FrameDecoder::~FrameDecoder() {
 }
 
 status_t FrameDecoder::init(
-        int64_t frameTimeUs, size_t numFrames, int option, int colorFormat) {
+        int64_t frameTimeUs, size_t numFrames, int option, int colorFormat,
+        bool syncVRTypeDetect) {
     if (!getDstColorFormat(
             (android_pixel_format_t)colorFormat, &mDstFormat, &mDstBpp)) {
         return ERROR_UNSUPPORTED;
+    }
+
+    sp<Surface> surface;
+    if (syncVRTypeDetect) {
+        // PICO: VR type detection decodes into a dummy surface.
+        mSyncVRTypeDetect = true;
+        sp<IGraphicBufferProducer> producer;
+        sp<IGraphicBufferConsumer> consumer;
+        BufferQueue::createBufferQueue(&producer, &consumer);
+        consumer->consumerConnect(new DummyConsumer, false);
+        surface = new Surface(producer);
     }
 
     sp<AMessage> videoFormat = onGetFormatAndSeekOptions(
@@ -220,7 +249,7 @@ status_t FrameDecoder::init(
     }
 
     err = decoder->configure(
-            videoFormat, NULL /* surface */, NULL /* crypto */, 0 /* flags */);
+            videoFormat, surface, NULL /* crypto */, 0 /* flags */);
     if (err != OK) {
         ALOGW("configure returned error %d (%s)", err, asString(err));
         decoder->release();
@@ -269,10 +298,23 @@ status_t FrameDecoder::extractFrames(std::vector<sp<IMemory> >* frames) {
     return OK;
 }
 
+int FrameDecoder::getVRType(int64_t frameTimeUs) {
+    mVRType = -1;
+    mDecoder->flush();
+    mHaveMoreInputs = true;
+    onGetFormatAndSeekOptions(frameTimeUs, 1 /*numFrames*/,
+            MediaSource::ReadOptions::SEEK_CLOSEST_SYNC, &mReadOptions);
+    extractInternal();
+    return mVRType;
+}
+
 status_t FrameDecoder::extractInternal() {
     status_t err = OK;
     bool done = false;
     size_t retriesLeft = kRetryCount;
+    if (mDecoder == NULL) {
+        return NO_INIT;
+    }
     do {
         size_t index;
         int64_t ptsUs = 0LL;
@@ -382,6 +424,12 @@ status_t FrameDecoder::extractInternal() {
                         ALOGE("failed to get output buffer %zu", index);
                         break;
                     }
+                    // PICO: the decoder reports the VR type of the frame in flag
+                    // bits 24..29, valid when bit 30 is set.
+                    if (flags & kVRTypeValidFlag) {
+                        mVRType = (flags >> kVRTypeShift) & kVRTypeMask;
+                        ALOGD("Get avaliable vr Type: %d", mVRType);
+                    }
                     err = onOutputReceived(videoFrameBuffer, mOutputFormat, ptsUs, &done);
                     mDecoder->releaseOutputBuffer(index);
                 } else {
@@ -451,8 +499,12 @@ sp<AMessage> VideoFrameDecoder::onGetFormatAndSeekOptions(
         return NULL;
     }
 
-    // TODO: Use Flexible color instead
-    if (dstFormat() == OMX_COLOR_Format16bitRGB565) {
+    if (mSyncVRTypeDetect) {
+        // PICO: makes ACodec enable OMX_IndexConfigSyncVRTypeDetect in the decoder,
+        // which reports the VR type in the flags of the output buffers.
+        videoFormat->setInt32("sync-vr-type-detect", 1);
+    } else if (dstFormat() == OMX_COLOR_Format16bitRGB565) {
+        // TODO: Use Flexible color instead
         videoFormat->setInt32("color-format", OMX_COLOR_Format16bitRGB565);
     } else {
         videoFormat->setInt32("color-format", OMX_COLOR_FormatYUV420Planar);
@@ -505,6 +557,11 @@ status_t VideoFrameDecoder::onOutputReceived(
     }
 
     *done = (++mNumFramesDecoded >= mNumFrames);
+
+    // PICO: VR type detection renders to a dummy surface, there is no frame to convert.
+    if (mSyncVRTypeDetect) {
+        return OK;
+    }
 
     if (outputFormat == NULL) {
         return ERROR_MALFORMED;

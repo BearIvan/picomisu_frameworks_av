@@ -43,6 +43,7 @@ struct StagefrightMetadataRetriever : public MediaMetadataRetrieverBase {
 
     virtual sp<IMemory> getFrameAtTime(
             int64_t timeUs, int option, int colorFormat, bool metaOnly);
+    virtual int getVRType(int detectCount);
     virtual sp<IMemory> getImageAtIndex(
             int index, int colorFormat, bool metaOnly, bool thumbnail);
     virtual sp<IMemory> getImageRectAtIndex(

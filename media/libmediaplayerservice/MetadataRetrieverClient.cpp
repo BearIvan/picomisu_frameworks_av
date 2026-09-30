@@ -210,6 +210,18 @@ sp<IMemory> MetadataRetrieverClient::getFrameAtTime(
     return frame;
 }
 
+int MetadataRetrieverClient::getVRType(int detectCount)
+{
+    ALOGI("getVRType: detectCount(%d)", detectCount);
+    Mutex::Autolock lock(mLock);
+    Mutex::Autolock glock(sLock);
+    if (mRetriever == NULL) {
+        ALOGE("retriever is not initialized");
+        return -1;
+    }
+    return mRetriever->getVRType(detectCount);
+}
+
 sp<IMemory> MetadataRetrieverClient::getImageAtIndex(
         int index, int colorFormat, bool metaOnly, bool thumbnail) {
     ALOGV("getImageAtIndex: index(%d) colorFormat(%d), metaOnly(%d) thumbnail(%d)",

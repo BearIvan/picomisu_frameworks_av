@@ -45,9 +45,14 @@ struct FrameDecoder : public RefBase {
             const sp<IMediaSource> &source);
 
     status_t init(
-            int64_t frameTimeUs, size_t numFrames, int option, int colorFormat);
+            int64_t frameTimeUs, size_t numFrames, int option, int colorFormat,
+            bool syncVRTypeDetect = false);
 
     sp<IMemory> extractFrame(FrameRect *rect = NULL);
+
+    // PICO: decodes one frame at |frameTimeUs| and returns the VR type that the
+    // decoder reported for it, or -1. Requires init() with syncVRTypeDetect.
+    int getVRType(int64_t frameTimeUs);
 
     status_t extractFrames(std::vector<sp<IMemory> >* frames);
 
@@ -85,6 +90,11 @@ protected:
         mFrames.push_back(frame);
     }
     bool mIDRSent;
+
+    // PICO: VR type reported by the decoder for the last output frame, and VR
+    // type detection mode.
+    int32_t mVRType;
+    bool mSyncVRTypeDetect;
 
 private:
     AString mComponentName;

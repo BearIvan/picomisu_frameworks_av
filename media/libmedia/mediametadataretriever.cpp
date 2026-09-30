@@ -154,6 +154,16 @@ sp<IMemory> MediaMetadataRetriever::getFrameAtTime(
     return mRetriever->getFrameAtTime(timeUs, option, colorFormat, metaOnly);
 }
 
+int MediaMetadataRetriever::getVRType(int detectCount)
+{
+    Mutex::Autolock _l(mLock);
+    if (mRetriever == 0) {
+        ALOGE("retriever is not initialized");
+        return -1;
+    }
+    return mRetriever->getVRType(detectCount);
+}
+
 sp<IMemory> MediaMetadataRetriever::getImageAtIndex(
         int index, int colorFormat, bool metaOnly, bool thumbnail) {
     ALOGV("getImageAtIndex: index(%d) colorFormat(%d) metaOnly(%d) thumbnail(%d)",

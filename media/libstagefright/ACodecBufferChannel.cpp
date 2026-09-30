@@ -428,6 +428,10 @@ void ACodecBufferChannel::drainThisBuffer(
     if (omxFlags & OMX_BUFFERFLAG_DATACORRUPT) {
         flags |= MediaCodec::BUFFER_FLAG_DATACORRUPT;
     }
+    // PICO: VR type of the frame reported by the decoder (bits 24..29, valid with bit 30).
+    if (omxFlags & 0x40000000) {
+        flags |= 0x40000000 | (omxFlags & 0x3f000000);
+    }
     it->mClientBuffer->meta()->setInt32("flags", flags);
 
     mCallback->onOutputBufferAvailable(

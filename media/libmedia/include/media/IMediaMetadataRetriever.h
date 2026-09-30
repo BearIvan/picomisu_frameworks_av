@@ -44,6 +44,8 @@ public:
             const sp<IDataSource>& dataSource, const char *mime) = 0;
     virtual sp<IMemory>     getFrameAtTime(
             int64_t timeUs, int option, int colorFormat, bool metaOnly) = 0;
+    // PICO: VR layout of the video track, detected by the decoder (vtable slot of the factory).
+    virtual int             getVRType(int detectCount) = 0;
     virtual sp<IMemory>     getImageAtIndex(
             int index, int colorFormat, bool metaOnly, bool thumbnail) = 0;
     virtual sp<IMemory>     getImageRectAtIndex(

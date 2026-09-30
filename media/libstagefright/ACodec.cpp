@@ -2347,6 +2347,23 @@ status_t ACodec::configureCodec(
         }
     }
 
+    // PICO: synchronous VR type detection of the video decoder. When enabled, the
+    // decoder reports the VR type of every output frame in the buffer flags.
+    if (mIsVideo) {
+        OMX_CONFIG_BOOLEANTYPE syncVRTypeDetect;
+        InitOMXParams(&syncVRTypeDetect);
+        int32_t detect = 0;
+        syncVRTypeDetect.bEnabled =
+                (OMX_BOOL)(msg->findInt32("sync-vr-type-detect", &detect) && detect != 0);
+        ALOGD("set OMX_IndexConfigSyncVRTypeDetect: %d", syncVRTypeDetect.bEnabled);
+        status_t detectErr = mOMXNode->setConfig(
+                (OMX_INDEXTYPE)OMX_IndexConfigSyncVRTypeDetect,
+                &syncVRTypeDetect, sizeof(syncVRTypeDetect));
+        if (detectErr != OK) {
+            ALOGW("codec does not support requested syncVyTypeDetect (err %d)", detectErr);
+        }
+    }
+
     // create data converters if needed
     if (!mIsVideo && !mIsImage && err == OK) {
         AudioEncoding codecPcmEncoding = kAudioEncodingPcm16bit;

@@ -74,6 +74,7 @@ enum {
     GET_FRAME_AT_INDEX,
     EXTRACT_ALBUM_ART,
     EXTRACT_METADATA,
+    GET_VR_TYPE,
 };
 
 class BpMediaMetadataRetriever: public BpInterface<IMediaMetadataRetriever>
@@ -166,6 +167,19 @@ public:
             return NULL;
         }
         return interface_cast<IMemory>(reply.readStrongBinder());
+    }
+
+    int getVRType(int detectCount)
+    {
+        ALOGD("getVRType: detectCount(%d)", detectCount);
+        Parcel data, reply;
+        data.writeInterfaceToken(IMediaMetadataRetriever::getInterfaceDescriptor());
+        data.writeInt32(detectCount);
+#ifndef DISABLE_GROUP_SCHEDULE_HACK
+        sendSchedPolicy(data);
+#endif
+        remote()->transact(GET_VR_TYPE, data, &reply);
+        return reply.readInt32();
     }
 
     sp<IMemory> getImageAtIndex(int index, int colorFormat, bool metaOnly, bool thumbnail)
@@ -373,6 +387,18 @@ status_t BnMediaMetadataRetriever::onTransact(
             } else {
                 reply->writeInt32(UNKNOWN_ERROR);
             }
+#ifndef DISABLE_GROUP_SCHEDULE_HACK
+            restoreSchedPolicy();
+#endif
+            return NO_ERROR;
+        } break;
+        case GET_VR_TYPE: {
+            CHECK_INTERFACE(IMediaMetadataRetriever, data, reply);
+            int detectCount = data.readInt32();
+#ifndef DISABLE_GROUP_SCHEDULE_HACK
+            setSchedPolicy(data);
+#endif
+            reply->writeInt32(getVRType(detectCount));
 #ifndef DISABLE_GROUP_SCHEDULE_HACK
             restoreSchedPolicy();
 #endif

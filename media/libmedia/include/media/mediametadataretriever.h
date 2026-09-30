@@ -94,6 +94,7 @@ public:
             const sp<IDataSource>& dataSource, const char *mime = NULL);
     sp<IMemory> getFrameAtTime(int64_t timeUs, int option,
             int colorFormat = HAL_PIXEL_FORMAT_RGB_565, bool metaOnly = false);
+    int getVRType(int detectCount);
     sp<IMemory> getImageAtIndex(int index,
             int colorFormat = HAL_PIXEL_FORMAT_RGB_565, bool metaOnly = false, bool thumbnail = false);
     sp<IMemory> getImageRectAtIndex(

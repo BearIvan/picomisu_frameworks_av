@@ -19,6 +19,8 @@
 
 #include <inttypes.h>
 
+#include <map>
+
 #include <utils/Log.h>
 #include <cutils/properties.h>
 
@@ -257,6 +259,136 @@ sp<IMemory> StagefrightMetadataRetriever::getFrameAtTime(
     status_t err = getFrameInternal(
             timeUs, 1, option, colorFormat, metaOnly, &frame, NULL /*outFrames*/);
     return (err == OK) ? frame : NULL;
+}
+
+// PICO: the hardware decoder of the video track reports the VR layout of the decoded
+// frames in the output buffer flags (see FrameDecoder::getVRType()). Up to
+// |detectCount| frames, one per 10 seconds of the track, are sampled at equal
+// distances and the most frequently reported layout wins.
+int StagefrightMetadataRetriever::getVRType(int detectCount) {
+    ALOGI("getVRType: detectCount: %d", detectCount);
+
+    if (mExtractor.get() == NULL) {
+        ALOGE("no extractor.");
+        return -1;
+    }
+
+    sp<MetaData> fileMeta = mExtractor->getMetaData();
+
+    if (fileMeta == NULL) {
+        ALOGE("extractor doesn't publish metadata, failed to initialize?");
+        return -1;
+    }
+
+    size_t n = mExtractor->countTracks();
+    size_t i;
+    for (i = 0; i < n; ++i) {
+        sp<MetaData> meta = mExtractor->getTrackMetaData(i);
+        if (!meta) {
+            continue;
+        }
+
+        const char *mime;
+        CHECK(meta->findCString(kKeyMIMEType, &mime));
+
+        if (!strncasecmp(mime, "video/", 6)) {
+            break;
+        }
+    }
+
+    if (i == n) {
+        ALOGE("no video track found.");
+        return -1;
+    }
+
+    sp<MetaData> trackMeta = mExtractor->getTrackMetaData(
+            i, MediaExtractor::kIncludeExtensiveMetaData);
+    if (!trackMeta) {
+        return -1;
+    }
+
+    sp<IMediaSource> source = mExtractor->getTrack(i);
+
+    if (source.get() == NULL) {
+        ALOGV("unable to instantiate video track.");
+        return -1;
+    }
+
+    const void *data;
+    uint32_t type;
+    size_t dataSize;
+    if (fileMeta->findData(kKeyAlbumArt, &type, &data, &dataSize)
+            && mAlbumArt == NULL) {
+        mAlbumArt = MediaAlbumArt::fromData(dataSize, data);
+    }
+
+    const char *mime;
+    CHECK(trackMeta->findCString(kKeyMIMEType, &mime));
+
+    Vector<AString> matchingCodecs;
+    MediaCodecList::findMatchingCodecs(
+            mime,
+            false, /* encoder */
+            MediaCodecList::kHardwareCodecsOnly,
+            &matchingCodecs);
+
+    if (matchingCodecs.size() == 0) {
+        ALOGE("Ther is null matching codecs!");
+        return -1;
+    }
+
+    const AString &componentName = matchingCodecs[0];
+    sp<VideoFrameDecoder> decoder = new VideoFrameDecoder(componentName, trackMeta, source);
+    if (decoder->init(0 /*frameTimeUs*/, 1 /*numFrames*/,
+            MediaSource::ReadOptions::SEEK_CLOSEST_SYNC /*option*/,
+            HAL_PIXEL_FORMAT_RGB_565 /*colorFormat*/, true /*syncVRTypeDetect*/) != OK) {
+        ALOGE("all codecs failed to extract vrType.");
+        return -1;
+    }
+
+    int32_t width = 0;
+    int32_t height = 0;
+    int64_t durationUs = 0;
+    trackMeta->findInt32(kKeyWidth, &width);
+    trackMeta->findInt32(kKeyHeight, &height);
+    trackMeta->findInt64(kKeyDuration, &durationUs);
+    if (durationUs == 0 || width == 0 || height == 0) {
+        ALOGE("Fail to extract frame, loss key info");
+        return -1;
+    }
+    if (width * height > 8192 * 4320) {
+        ALOGW("Need not to extract frame when it is bigger than 8K");
+        return -1;
+    }
+
+    int32_t vrTypeDetectCount = durationUs / 10000000LL + 1;
+    if (vrTypeDetectCount < detectCount) {
+        detectCount = vrTypeDetectCount;
+    }
+    ALOGD("Get actual vrTypeDetectCount: %d", detectCount);
+
+    std::map<int32_t, int32_t> vrTypeCounts;
+    int32_t finalVrType = -1;
+    int32_t maxCount = 0;
+    for (int32_t index = 0; index < detectCount; index++) {
+        int64_t targetFrameTimeUs = durationUs / (detectCount + 1) * index;
+        int32_t vrType = decoder->getVRType(targetFrameTimeUs);
+        ALOGD("extractFrameAndVRInfo targetFrameTimeUs: %lld, vrType: %d",
+                (long long)targetFrameTimeUs, vrType);
+        int32_t count = 0;
+        if (vrTypeCounts.find(vrType) == vrTypeCounts.end()) {
+            vrTypeCounts.insert(std::make_pair(vrType, 1));
+        } else {
+            count = vrTypeCounts[vrType] + 1;
+            vrTypeCounts[vrType] = count;
+        }
+        if (count >= maxCount) {
+            maxCount = count;
+            finalVrType = vrType;
+        }
+    }
+    ALOGD("Get finalVrType: %d", finalVrType);
+    return finalVrType;
 }
 
 status_t StagefrightMetadataRetriever::getFrameAtIndex(
