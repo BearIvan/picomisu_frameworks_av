@@ -18,6 +18,7 @@
 
 #define MEDIA_CODEC_H_
 
+#include <list>
 #include <memory>
 #include <vector>
 
@@ -55,6 +56,10 @@ namespace V1_0 {
 struct IDescrambler;
 }}}}
 using hardware::cas::native::V1_0::IDescrambler;
+// PICO: factory libpxrmediametrics item, see PxrMediaAnalytics.h
+namespace pico {
+class PxrMediaAnalyticsItem;
+}
 
 struct MediaCodec : public AHandler {
     enum ConfigureFlags {
@@ -261,6 +266,8 @@ private:
         kWhatSetNotification                = 'setN',
         kWhatDrmReleaseCrypto               = 'rDrm',
         kWhatCheckBatteryStats              = 'chkB',
+        // PICO: once-per-second performance sample (fps / decode latency)
+        kWhatCodecPerformanceNotify         = 'pfnt',
     };
 
     enum {
@@ -335,6 +342,25 @@ private:
     void updateAnalyticsItem();
     void flushAnalyticsItem();
     void updateEphemeralAnalytics(MediaAnalyticsItem *item);
+
+    // PICO: pxrmediametrics telemetry of the factory PICO OS MediaCodec. The
+    // "key_event" of each record; the enumerator names are reconstructed, the
+    // values and event strings are the factory ones.
+    enum MediaMetricsEventKey {
+        kMetricsEventCodecConfigure     = 0,    // "media_codec_configure"
+        kMetricsEventStreamOn           = 1,    // "media_codec_stream_on"
+        kMetricsEventPerformanceUpdate  = 2,    // "media_codec_performance_update"
+        kMetricsEventCodecStop          = 3,    // "media_codec_codec_stop"
+    };
+    void initPxrAnalyticsItem();
+    void deInitPxrAnalyticsItem();
+    void appendPxrMediaMetricsEvent(MediaMetricsEventKey key);
+    void updatePxrAnalyticsItemLatencyEvent();
+    void submitPxrAnalyticsItem();
+    bool checkPxrAnalyticsItemPreviousKeyEvent(const char *keyEvent);
+    void updatePlaybackDuration(const sp<AMessage> &msg);
+    void updateVrTypeCalculator(int32_t flags);
+    void updateSurfaceInfo(const sp<Surface> &surface);
 
     sp<AMessage> mOutputFormat;
     sp<AMessage> mInputFormat;
@@ -466,7 +492,35 @@ private:
     Mutex mLatencyLock;
     int64_t mLatencyUnknown;    // buffers for which we couldn't calculate latency
 
+    // PICO: pxrmediametrics state (declared in the factory member order)
+    int64_t mFirstFrameLatencyUs;           // latency of the first measured output frame
+    int32_t mVrType;                        // last/final VR type of the output frames
+    bool mUseSurface;                       // output goes to a surface
+    bool mPerformanceReported;              // stream-on record sent for this start
+    bool mLowLatency;                       // configured for low latency
+    AString mBufferQueueName;               // consumer name of the output surface
+    pico::PxrMediaAnalyticsItem *mPxrAnalyticsItem;
+    int64_t mPlaybackDurationNs;            // accumulated rendering time
+    int64_t mPreviousRenderTimeNs;
+    int32_t mRenderedFrameCount;
+    std::list<int32_t> mVrTypeList;         // VR types of the first output frames
+
     sp<BatteryChecker> mBatteryChecker;
+
+    // PICO: reset by initPxrAnalyticsItem()
+    enum {
+        kPerfDataCount = 300,               // one sample per second
+    };
+    int64_t mFirstInputPtsUs;
+    int32_t mSourceFrameRate;
+    int32_t mInputFrameCount;
+    int32_t mPerfDataIndex;
+    struct PerfSamples {
+        int16_t mFps[kPerfDataCount];
+        int16_t mLatencyMs[kPerfDataCount];
+        int16_t mFrameCount;                // output frames in the current second
+        int16_t mLatencyCount;              // latency samples in the current second
+    } mPerfSamples;
 
     void statsBufferSent(int64_t presentationUs);
     void statsBufferReceived(int64_t presentationUs);
@@ -488,6 +542,8 @@ private:
 
     int64_t mRecentSamples[kRecentLatencyFrames];
     int mRecentHead;
+    // PICO: mRecentHead at the previous kWhatCodecPerformanceNotify
+    int mLastRecentHead;
     Mutex mRecentLock;
 
     class Histogram {

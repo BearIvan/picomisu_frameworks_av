@@ -309,6 +309,10 @@ protected:
         kExtensionsExist,
     } mVendorExtensionsStatus;
 
+    // PICO: output buffer count requested by "pico.extra-buffer-count" for video
+    // decoders on a native window (-1 / <= 0: default allocation)
+    int32_t mExtraBufferCount;
+
     status_t setCyclicIntraMacroblockRefresh(const sp<AMessage> &msg, int32_t mode);
     virtual status_t allocateBuffersOnPort(OMX_U32 portIndex);
     virtual status_t freeBuffersOnPort(OMX_U32 portIndex);

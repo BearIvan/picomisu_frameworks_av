@@ -577,7 +577,8 @@ ACodec::ACodec()
       mDescribeHDRStaticInfoIndex((OMX_INDEXTYPE)0),
       mDescribeHDR10PlusInfoIndex((OMX_INDEXTYPE)0),
       mStateGeneration(0),
-      mVendorExtensionsStatus(kExtensionsUnchecked) {
+      mVendorExtensionsStatus(kExtensionsUnchecked),
+      mExtraBufferCount(-1) {
     memset(&mLastHDRStaticInfo, 0, sizeof(mLastHDRStaticInfo));
 
     mUninitializedState = new UninitializedState(this);
@@ -1193,12 +1194,26 @@ status_t ACodec::configureOutputBuffersFromNativeWindow(
     for (OMX_U32 extraBuffers = 2 + 1; /* condition inside loop */; extraBuffers--) {
         OMX_U32 newBufferCount =
             def.nBufferCountMin + *minUndequeuedBuffers + extraBuffers;
+        // PICO: "pico.extra-buffer-count" replaces the undequeued/extra buffers
+        if (mExtraBufferCount > 0) {
+            ALOGD("def.nBufferCountMin: %d, minUndequeuedBuffers: %d, extraBuffers: %d, "
+                    "mUseExtraNativeWindowBuffers: %d",
+                    def.nBufferCountMin, *minUndequeuedBuffers, extraBuffers, mExtraBufferCount);
+            newBufferCount = def.nBufferCountMin + mExtraBufferCount;
+        }
         def.nBufferCountActual = newBufferCount;
         err = mOMXNode->setParameter(
                 OMX_IndexParamPortDefinition, &def, sizeof(def));
 
         if (err == OK) {
-            *minUndequeuedBuffers += extraBuffers;
+            // PICO
+            if (mExtraBufferCount > 0) {
+                *minUndequeuedBuffers = mExtraBufferCount;
+            } else {
+                *minUndequeuedBuffers += extraBuffers;
+            }
+            ALOGD("%s: minUndequeuedBuffers is updated to %d",
+                    __FUNCTION__, *minUndequeuedBuffers);
             break;
         }
 
@@ -1734,6 +1749,13 @@ status_t ACodec::configureCodec(
     mIsEncoder = encoder;
     mIsVideo = !strncasecmp(mime, "video/", 6);
     mIsImage = !strncasecmp(mime, "image/", 6);
+
+    // PICO: output buffer count of video decoders requested by the client
+    if (!encoder && mIsVideo) {
+        if (!msg->findInt32("pico.extra-buffer-count", &mExtraBufferCount)) {
+            mExtraBufferCount = -1;
+        }
+    }
 
     mPortMode[kPortIndexInput] = IOMX::kPortModePresetByteBuffer;
     mPortMode[kPortIndexOutput] = IOMX::kPortModePresetByteBuffer;

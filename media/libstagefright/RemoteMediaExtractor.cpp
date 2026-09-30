@@ -18,11 +18,15 @@
 #define LOG_TAG "RemoteMediaExtractor"
 #include <utils/Log.h>
 
+#include <string.h>
+
 #include <binder/IPCThreadState.h>
 #include <media/stagefright/InterfaceUtils.h>
 #include <media/MediaAnalyticsItem.h>
 #include <media/MediaSource.h>
 #include <media/stagefright/RemoteMediaExtractor.h>
+
+#include "include/PxrMediaAnalytics.h"
 
 // still doing some on/off toggling here.
 #define MEDIA_LOG       1
@@ -49,6 +53,8 @@ RemoteMediaExtractor::RemoteMediaExtractor(
      mExtractorPlugin(plugin) {
 
     mAnalyticsItem = nullptr;
+    // PICO: only set for video containers, and released again below
+    mPxrAnalyticsItem = nullptr;
     if (MEDIA_LOG) {
         mAnalyticsItem = MediaAnalyticsItem::create(kKeyExtractor);
 
@@ -64,7 +70,10 @@ RemoteMediaExtractor::RemoteMediaExtractor(
         mAnalyticsItem->setInt32(kExtractorTracks, ntracks);
         // metadata
         MetaDataBase pMetaData;
-        if (extractor->getMetaData(pMetaData) == OK) {
+        if (extractor->getMetaData(pMetaData) != OK) {
+            // PICO
+            ALOGW("Sniff pMetaData is nullprt!");
+        } else {
             String8 xx = pMetaData.toString();
             // 'titl' -- but this verges into PII
             // 'mime'
@@ -73,6 +82,77 @@ RemoteMediaExtractor::RemoteMediaExtractor(
                 mAnalyticsItem->setCString(kExtractorMime,  mime);
             }
             // what else is interesting and not already available?
+
+            // PICO: pxrmediametrics record of video containers
+            if (mime != nullptr && !strncmp(mime, "video", 5)) {
+                mPxrAnalyticsItem = pxr::create(kKeyExtractor);
+                pxr::generateSessionID(mPxrAnalyticsItem);
+                pxr::setUid(mPxrAnalyticsItem, uid);
+                pxr::setCString(mPxrAnalyticsItem, "key_event", "media_extractor_start");
+                pxr::setCString(mPxrAnalyticsItem, "file_type", mime);
+
+                int32_t videoWidth = 0;
+                if (pMetaData.findInt32(kKeyWidth, &videoWidth)) {
+                    pxr::setInt32(mPxrAnalyticsItem, "video_width", videoWidth);
+                }
+                // NB: the factory code looks the height up with kKeyWidth too
+                int32_t videoHeight = 0;
+                if (pMetaData.findInt32(kKeyWidth, &videoHeight)) {
+                    pxr::setInt32(mPxrAnalyticsItem, "video_height", videoHeight);
+                }
+                // NB: kKeyDuration is an int64 key, so this is only set when a
+                // container stores it as int32 (factory behaviour)
+                int32_t videoDuration = 0;
+                if (pMetaData.findInt32(kKeyDuration, &videoDuration)) {
+                    pxr::setInt32(mPxrAnalyticsItem, "video_duration", videoDuration);
+                }
+                int32_t videoFps = 0;
+                if (pMetaData.findInt32(kKeyFrameRate, &videoFps)) {
+                    pxr::setInt32(mPxrAnalyticsItem, "video_fps", videoFps);
+                }
+                int32_t videoBitrate = 0;
+                if (pMetaData.findInt32(kKeyBitRate, &videoBitrate)) {
+                    pxr::setInt32(mPxrAnalyticsItem, "video_bitrate", videoBitrate);
+                }
+
+                MetaDataBase trackMeta;
+                size_t numTracks = extractor->countTracks();
+                int32_t videoTrackCount = 0;
+                int32_t audioTrackCount = 0;
+                int32_t subtitleTrackCount = 0;
+                for (int32_t i = 0; (size_t)i < numTracks; i++) {
+                    extractor->getTrackMetaData(
+                            trackMeta, i, MediaExtractor::kIncludeExtensiveMetaData);
+                    const char *trackMime = nullptr;
+                    if (!trackMeta.findCString(kKeyMIMEType, &trackMime)) {
+                        ALOGD("trackIndex %d mime is null", i);
+                        continue;
+                    }
+                    if (!strncmp(trackMime, "video", 5)) {
+                        if (videoTrackCount == 0) {
+                            pxr::setCString(mPxrAnalyticsItem, "video_encode_type", trackMime);
+                        }
+                        videoTrackCount++;
+                    }
+                    if (!strncmp(trackMime, "audio", 5)) {
+                        if (audioTrackCount == 0) {
+                            pxr::setCString(mPxrAnalyticsItem, "audio_encode_type", trackMime);
+                        }
+                        audioTrackCount++;
+                    }
+                    if (!strncmp(trackMime, "subtitle", 8)) {
+                        subtitleTrackCount++;
+                    }
+                    pxr::setInt32(mPxrAnalyticsItem, "audio_track_count", audioTrackCount);
+                    pxr::setInt32(mPxrAnalyticsItem, "subtitle_track_count", subtitleTrackCount);
+                }
+
+                if (pxr::count(mPxrAnalyticsItem) > 0) {
+                    pxr::selfrecord(mPxrAnalyticsItem);
+                    pxr::destroy(mPxrAnalyticsItem);
+                    mPxrAnalyticsItem = nullptr;
+                }
+            }
         }
     }
 }

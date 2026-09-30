@@ -24,6 +24,10 @@
 namespace android {
 
 class MediaAnalyticsItem;
+// PICO: factory libpxrmediametrics item, see PxrMediaAnalytics.h
+namespace pico {
+class PxrMediaAnalyticsItem;
+}
 
 // IMediaExtractor wrapper to the MediaExtractor.
 class RemoteMediaExtractor : public BnMediaExtractor {
@@ -49,6 +53,8 @@ private:
     sp<RefBase> mExtractorPlugin;
 
     MediaAnalyticsItem *mAnalyticsItem;
+    // PICO: pxrmediametrics "media_extractor_start" record (constructor only)
+    pico::PxrMediaAnalyticsItem *mPxrAnalyticsItem;
 
     explicit RemoteMediaExtractor(
             MediaExtractor *extractor,

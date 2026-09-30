@@ -21,6 +21,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 
+#include "include/PxrMediaAnalytics.h"
 #include "include/SecureBuffer.h"
 #include "include/SharedMemoryBuffer.h"
 #include "include/SoftwareRenderer.h"
@@ -105,6 +106,21 @@ static const char *kCodecRecentLatencyHist = "android.media.mediacodec.recent.hi
 
 // XXX suppress until we get our representation right
 static bool kEmitHistogram = false;
+
+// PICO: pxrmediametrics (libpxrmediametrics.so) record attributes of the
+// factory PICO OS MediaCodec. The record key is kCodecKeyName ("codec").
+static const char *kPxrKeyEvent = "key_event";
+static const char *kPxrEventCodecConfigure = "media_codec_configure";
+static const char *kPxrEventStreamOn = "media_codec_stream_on";
+static const char *kPxrEventPerformanceUpdate = "media_codec_performance_update";
+static const char *kPxrEventCodecStop = "media_codec_codec_stop";
+static const char *kPxrEventInformationChange = "media_codec_information_change";
+// PICO: VR type of an output frame in the buffer flags, reported by the decoder
+// (see ACodecBufferChannel::drainThisBuffer): bits 24..29, valid with bit 30.
+static const int32_t kVrTypeValidFlag = 0x40000000;
+static const int32_t kVrTypeInvalid = 0x3f;
+// PICO: number of output frame VR types the final VR type is voted from
+static const size_t kVrTypeDetectFrames = 10;
 
 
 static int64_t getId(const sp<IResourceManagerClient> &client) {
@@ -540,7 +556,16 @@ MediaCodec::MediaCodec(const sp<ALooper> &looper, pid_t pid, uid_t uid)
       mHaveInputSurface(false),
       mHavePendingInputBuffers(false),
       mCpuBoostRequested(false),
-      mLatencyUnknown(0) {
+      mLatencyUnknown(0),
+      mFirstFrameLatencyUs(-1),
+      mVrType(-1),
+      mUseSurface(false),
+      mPerformanceReported(false),
+      mLowLatency(false),
+      mPxrAnalyticsItem(NULL),
+      mPlaybackDurationNs(0),
+      mPreviousRenderTimeNs(0),
+      mRenderedFrameCount(0) {
     if (uid == kNoUid) {
         mUid = IPCThreadState::self()->getCallingUid();
     } else {
@@ -550,6 +575,8 @@ MediaCodec::MediaCodec(const sp<ALooper> &looper, pid_t pid, uid_t uid)
     mResourceManagerService = new ResourceManagerServiceProxy(pid, mUid);
 
     initAnalyticsItem();
+    // PICO
+    initPxrAnalyticsItem();
 }
 
 MediaCodec::~MediaCodec() {
@@ -557,6 +584,8 @@ MediaCodec::~MediaCodec() {
     mResourceManagerService->removeClient(getId(mResourceManagerClient));
 
     flushAnalyticsItem();
+    // PICO: final record of the codec; also releases mPxrAnalyticsItem
+    appendPxrMediaMetricsEvent(kMetricsEventCodecStop);
 }
 
 void MediaCodec::initAnalyticsItem() {
@@ -572,6 +601,8 @@ void MediaCodec::initAnalyticsItem() {
             mRecentSamples[i] = kRecentSampleInvalid;
         }
         mRecentHead = 0;
+        // PICO
+        mLastRecentHead = 0;
     }
 }
 
@@ -652,6 +683,229 @@ void MediaCodec::flushAnalyticsItem() {
         delete mAnalyticsItem;
         mAnalyticsItem = NULL;
     }
+}
+
+// PICO: pxrmediametrics telemetry of the factory PICO OS MediaCodec.
+void MediaCodec::initPxrAnalyticsItem() {
+    if (mPxrAnalyticsItem == NULL) {
+        mPxrAnalyticsItem = pxr::create(kCodecKeyName);
+        pxr::deathNotifyToServer(mPxrAnalyticsItem);
+    }
+
+    mPerfDataIndex = 0;
+    memset(&mPerfSamples, 0, sizeof(mPerfSamples));
+    mFirstInputPtsUs = -1;
+    mSourceFrameRate = -1;
+    mInputFrameCount = 0;
+}
+
+void MediaCodec::deInitPxrAnalyticsItem() {
+    if (mPxrAnalyticsItem != NULL) {
+        pxr::destroy(mPxrAnalyticsItem);
+        mPxrAnalyticsItem = NULL;
+    }
+}
+
+void MediaCodec::submitPxrAnalyticsItem() {
+    // don't log empty records
+    if (mPxrAnalyticsItem != NULL && pxr::count(mPxrAnalyticsItem) > 0) {
+        pxr::selfrecord(mPxrAnalyticsItem);
+    }
+}
+
+bool MediaCodec::checkPxrAnalyticsItemPreviousKeyEvent(const char *keyEvent) {
+    char *previousKeyEvent = NULL;
+    if (mPxrAnalyticsItem == NULL) {
+        ALOGW("%s when mPxrAnalyticsItem is null", __FUNCTION__);
+        return false;
+    }
+    pxr::getCString(mPxrAnalyticsItem, kPxrKeyEvent, &previousKeyEvent);
+    bool same;
+    if (keyEvent == NULL || previousKeyEvent == NULL) {
+        same = (keyEvent == NULL && previousKeyEvent == NULL);
+    } else {
+        same = (strcmp(previousKeyEvent, keyEvent) == 0);
+    }
+    // getCString() returns a strdup()ed copy (the factory code does not free it)
+    free(previousKeyEvent);
+    return same;
+}
+
+void MediaCodec::updatePxrAnalyticsItemLatencyEvent() {
+    if (mPxrAnalyticsItem == NULL || mLatencyHist.getCount() == 0) {
+        return;
+    }
+    pxr::setInt32(mPxrAnalyticsItem, "decode_latency_max", (int32_t)mLatencyHist.getMax());
+    pxr::setInt32(mPxrAnalyticsItem, "decode_latency_min", (int32_t)mLatencyHist.getMin());
+    pxr::setInt32(mPxrAnalyticsItem, "decode_latency_avg", (int32_t)mLatencyHist.getAvg());
+}
+
+void MediaCodec::appendPxrMediaMetricsEvent(MediaMetricsEventKey key) {
+    if (mPxrAnalyticsItem == NULL) {
+        ALOGE("appendPxrMediaMetricsEvent when mPxrAnalyticsItem is null!");
+        return;
+    }
+
+    switch (key) {
+        case kMetricsEventCodecConfigure:
+        {
+            if (checkPxrAnalyticsItemPreviousKeyEvent(kPxrEventCodecConfigure)) {
+                ALOGE("appendPxrMediaMetricsEvent failed when event is dup %s",
+                        kPxrEventCodecConfigure);
+                break;
+            }
+            pxr::setCString(mPxrAnalyticsItem, kPxrKeyEvent, kPxrEventCodecConfigure);
+            submitPxrAnalyticsItem();
+            break;
+        }
+
+        case kMetricsEventStreamOn:
+        {
+            if (checkPxrAnalyticsItemPreviousKeyEvent(kPxrEventStreamOn)) {
+                ALOGE("appendPxrMediaMetricsEvent failed when event is dup %s",
+                        kPxrEventStreamOn);
+                break;
+            }
+            pxr::setCString(mPxrAnalyticsItem, kPxrKeyEvent, kPxrEventStreamOn);
+            AString colorFormat;
+            if (mOutputFormat->findString("color-format", &colorFormat)) {
+                pxr::setCString(mPxrAnalyticsItem, "color_format", colorFormat.c_str());
+            }
+            int32_t colorTransfer;
+            if (mOutputFormat->findInt32("color-transfer", &colorTransfer)) {
+                pxr::setInt32(mPxrAnalyticsItem, "hdr_color_sapce", colorTransfer);
+            }
+            pxr::setInt32(mPxrAnalyticsItem, "use_surface", mUseSurface);
+            pxr::setCString(mPxrAnalyticsItem, "buffer_queue_name", mBufferQueueName.c_str());
+            submitPxrAnalyticsItem();
+            break;
+        }
+
+        case kMetricsEventPerformanceUpdate:
+        {
+            ALOGI("%s: Media_Codec_Performance_Update", __FUNCTION__);
+            pxr::setCString(mPxrAnalyticsItem, kPxrKeyEvent, kPxrEventPerformanceUpdate);
+            submitPxrAnalyticsItem();
+            break;
+        }
+
+        case kMetricsEventCodecStop:
+        {
+            if (checkPxrAnalyticsItemPreviousKeyEvent(kPxrEventCodecStop)) {
+                ALOGE("appendPxrMediaMetricsEvent failed when event is dup %s",
+                        kPxrEventCodecStop);
+                break;
+            }
+            pxr::setCString(mPxrAnalyticsItem, kPxrKeyEvent, kPxrEventCodecStop);
+            updatePxrAnalyticsItemLatencyEvent();
+            int32_t playbackDurationSec = (int32_t)(mPlaybackDurationNs / 1000000000LL);
+            if (playbackDurationSec > 0) {
+                pxr::setInt32(mPxrAnalyticsItem, "playback_duration", playbackDurationSec);
+            }
+            submitPxrAnalyticsItem();
+            // the record of this codec session ends here
+            deInitPxrAnalyticsItem();
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+void MediaCodec::updatePlaybackDuration(const sp<AMessage> &msg) {
+    int what = 0;
+    msg->findInt32("what", &what);
+    if (msg->what() != kWhatCodecNotify && what != kWhatOutputFramesRendered) {
+        static bool logged_once = false;
+        if (!logged_once) {
+            ALOGE("updatePlaybackDuration: expected kWhatOuputFramesRendered (%d)", msg->what());
+            logged_once = true;
+        }
+        return;
+    }
+    // Playback duration only counts if the buffers are going to a surface.
+    if (!mUseSurface) {
+        return;
+    }
+    int64_t renderTimeNs;
+    size_t index = 0;
+    while (msg->findInt64(AStringPrintf("%zu-system-nano", index++).c_str(), &renderTimeNs)) {
+        // If we detect wrap-around or out of order frames, just ignore the duration
+        // for this and the next frame.
+        if (mPreviousRenderTimeNs > renderTimeNs) {
+            mPreviousRenderTimeNs = 0;
+        } else if (mPreviousRenderTimeNs > 0) {
+            int64_t timeSinceLastRenderNs = renderTimeNs - mPreviousRenderTimeNs;
+            if (timeSinceLastRenderNs < 500000000LL) {
+                mPlaybackDurationNs += timeSinceLastRenderNs;
+            }
+        }
+        mPreviousRenderTimeNs = renderTimeNs;
+        mRenderedFrameCount++;
+    }
+
+    // Report the stream once 3 s have been rendered, then sample the
+    // performance once per second (kWhatCodecPerformanceNotify).
+    if (!mPerformanceReported && mPlaybackDurationNs >= 3000000000LL) {
+        pxr::setInt32(mPxrAnalyticsItem, "first_frame_latency", (int32_t)mFirstFrameLatencyUs);
+        pxr::setInt32(mPxrAnalyticsItem, "frame_rate", mSourceFrameRate);
+        pxr::setInt32(mPxrAnalyticsItem, "render_frame_rate",
+                (int32_t)(mRenderedFrameCount / (mPlaybackDurationNs / 1000000000LL)));
+        pxr::setInt32(mPxrAnalyticsItem, "video_vr_type", mVrType);
+        appendPxrMediaMetricsEvent(kMetricsEventStreamOn);
+        mPerformanceReported = true;
+        mPerfSamples.mFrameCount = 0;
+        mPerfSamples.mLatencyCount = 0;
+        sp<AMessage> perfMsg = new AMessage(kWhatCodecPerformanceNotify, this);
+        perfMsg->post(1000000);
+    }
+}
+
+void MediaCodec::updateVrTypeCalculator(int32_t flags) {
+    if (!(flags & kVrTypeValidFlag)) {
+        return;
+    }
+    mVrType = (flags >> 24) & 0x3f;
+    if (mVrType == kVrTypeInvalid) {
+        return;
+    }
+
+    if (mVrTypeList.size() == 0) {
+        ALOGD("Report First kEventCodecVideoVRType(%d)", mVrType);
+        pxr::setInt32(mPxrAnalyticsItem, "video_vr_type", mVrType);
+        pxr::setCString(mPxrAnalyticsItem, kPxrKeyEvent, kPxrEventInformationChange);
+        submitPxrAnalyticsItem();
+    }
+
+    mVrTypeList.push_back(mVrType);
+    if (mVrTypeList.size() == kVrTypeDetectFrames) {
+        // majority vote over the VR types of the first output frames
+        mVrType = -1;
+        int32_t votes = 0;
+        for (int32_t vrType : mVrTypeList) {
+            if (votes == 0) {
+                mVrType = vrType;
+                votes = 1;
+            } else if (vrType == mVrType) {
+                votes++;
+            } else {
+                votes--;
+            }
+        }
+        ALOGD("Detect final vr type: %d", mVrType);
+        pxr::setInt32(mPxrAnalyticsItem, "video_vr_type", mVrType);
+        pxr::setCString(mPxrAnalyticsItem, kPxrKeyEvent, kPxrEventInformationChange);
+        submitPxrAnalyticsItem();
+    }
+}
+
+void MediaCodec::updateSurfaceInfo(const sp<Surface> &surface) {
+    pxr::setInt32(mPxrAnalyticsItem, "use_surface", mUseSurface);
+    mBufferQueueName = AString(surface->getConsumerName());
+    pxr::setCString(mPxrAnalyticsItem, "buffer_queue_name", mBufferQueueName.c_str());
+    pxr::setCString(mPxrAnalyticsItem, kPxrKeyEvent, kPxrEventInformationChange);
+    submitPxrAnalyticsItem();
 }
 
 bool MediaCodec::Histogram::setup(int nbuckets, int64_t width, int64_t floor)
@@ -753,6 +1007,24 @@ void MediaCodec::statsBufferSent(int64_t presentationUs) {
         return;
     }
 
+    // PICO: source frame rate, measured from the input timestamps once 2.5 s
+    // have been rendered
+    mInputFrameCount++;
+    if (presentationUs != INT64_MAX && mFirstInputPtsUs == -1) {
+        mFirstInputPtsUs = presentationUs;
+    }
+    if (presentationUs != INT64_MAX && mSourceFrameRate == -1
+            && mPlaybackDurationNs >= 2500000000LL) {
+        int64_t durationUs = presentationUs - mFirstInputPtsUs;
+        durationUs = durationUs < 0 ? -durationUs : durationUs;
+        int32_t sourceFrameRate = 0;
+        if (durationUs > 0) {
+            sourceFrameRate = (int32_t)((mInputFrameCount - 1) * 1000000.0 / durationUs);
+        }
+        mSourceFrameRate = sourceFrameRate;
+        ALOGI("Get SourceFrameRate: %d", sourceFrameRate);
+    }
+
     if (mBatteryChecker != nullptr) {
         mBatteryChecker->onCodecActivity([this] () {
             addResource(MediaResource::kBattery, MediaResource::kVideoCodec, 1);
@@ -780,6 +1052,9 @@ void MediaCodec::statsBufferReceived(int64_t presentationUs) {
 
     // mutex access to mBuffersInFlight and other stats
     Mutex::Autolock al(mLatencyLock);
+
+    // PICO: output frames of the current second (kWhatCodecPerformanceNotify)
+    mPerfSamples.mFrameCount++;
 
     // how long this buffer took for the round trip through the codec
     // NB: pipelining can/will make these times larger. e.g., if each packet
@@ -838,6 +1113,13 @@ void MediaCodec::statsBufferReceived(int64_t presentationUs) {
     int64_t latencyUs = (nowNs - startdata.startedNs + 500) / 1000;
 
     mLatencyHist.insert(latencyUs);
+
+    // PICO: latency samples of the current second, and the latency of the
+    // first measured frame
+    mPerfSamples.mLatencyCount++;
+    if (latencyUs > 0 && mFirstFrameLatencyUs == -1) {
+        mFirstFrameLatencyUs = (nowNs - startdata.startedNs) / 1000;
+    }
 
     // push into the recent samples
     {
@@ -997,6 +1279,11 @@ status_t MediaCodec::init(const AString &name, bool nameIsType) {
     msg->setString("name", name);
     msg->setInt32("nameIsType", nameIsType);
 
+    // PICO
+    if (mPxrAnalyticsItem != NULL) {
+        pxr::setCString(mPxrAnalyticsItem, "codec_name", name.c_str());
+    }
+
     if (mAnalyticsItem != NULL) {
         mAnalyticsItem->setCString(kCodecCodec, name.c_str());
         mAnalyticsItem->setCString(kCodecMode, mIsVideo ? kCodecModeVideo : kCodecModeAudio);
@@ -1079,6 +1366,38 @@ status_t MediaCodec::configure(
             mRotationDegrees = 0;
         }
 
+        // PICO
+        if (mPxrAnalyticsItem != NULL) {
+            pxr::setInt32(mPxrAnalyticsItem, "video_width", mVideoWidth);
+            pxr::setInt32(mPxrAnalyticsItem, "video_height", mVideoHeight);
+            pxr::setInt32(mPxrAnalyticsItem, "rotation_degrees", mRotationDegrees);
+            pxr::setInt32(mPxrAnalyticsItem, "is_protected", (mFlags & kFlagIsSecure) ? 1 : 0);
+            float frameRate = 0;
+            if (!format->findFloat("frame-rate", &frameRate)) {
+                int32_t frameRateInt;
+                if (format->findInt32("frame-rate", &frameRateInt)) {
+                    frameRate = (float)frameRateInt;
+                }
+            }
+            pxr::setInt32(mPxrAnalyticsItem, "frame_rate", (int32_t)frameRate);
+            int32_t bitrateMode;
+            if (format->findInt32("bitrate-mode", &bitrateMode)) {
+                pxr::setInt32(mPxrAnalyticsItem, "bitrate_mode", bitrateMode);
+            }
+            int32_t lowLatency = 0;
+            if ((format->findInt32("vendor.qti-ext-dec-low-latency.enable", &lowLatency)
+                            && lowLatency != 0)
+                    || (format->findInt32("vendor.qti-ext-enc-low-latency.enable", &lowLatency)
+                            && lowLatency != 0)
+                    || (format->findInt32("low-latency", &lowLatency) && lowLatency != 0)) {
+                mLowLatency = true;
+            }
+            // the item keeps pointers to the per-second fps / latency arrays
+            pxr::setPerformanceData(mPxrAnalyticsItem, mLowLatency,
+                    mPerfSamples.mFps, kPerfDataCount,
+                    mPerfSamples.mLatencyMs, kPerfDataCount);
+        }
+
         if (mAnalyticsItem != NULL) {
             mAnalyticsItem->setInt32(kCodecWidth, mVideoWidth);
             mAnalyticsItem->setInt32(kCodecHeight, mVideoHeight);
@@ -1098,6 +1417,16 @@ status_t MediaCodec::configure(
                (uint64_t)mVideoWidth * mVideoHeight > (uint64_t)INT32_MAX / 4) {
             ALOGE("Invalid size(s), width=%d, height=%d", mVideoWidth, mVideoHeight);
             return BAD_VALUE;
+        }
+    } else if (mPxrAnalyticsItem != NULL) {
+        // PICO
+        int32_t channelCount = 0;
+        if (format->findInt32("channel-count", &channelCount)) {
+            pxr::setInt32(mPxrAnalyticsItem, "channel_count", channelCount);
+        }
+        int32_t sampleRate = 0;
+        if (format->findInt32("sample-rate", &sampleRate)) {
+            pxr::setInt32(mPxrAnalyticsItem, "sample_rate", sampleRate);
         }
     }
 
@@ -1874,6 +2203,9 @@ bool MediaCodec::handleDequeueOutputBuffer(const sp<AReplyToken> &replyID, bool 
         int32_t flags;
         CHECK(buffer->meta()->findInt32("flags", &flags));
 
+        // PICO
+        updateVrTypeCalculator(flags);
+
         response->setInt32("flags", flags);
         response->postReply(replyID);
     }
@@ -1901,6 +2233,16 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                         mFlags |= kFlagSawMediaServerDie;
                         mFlags &= ~kFlagIsComponentAllocated;
                     }
+
+                    // PICO: close the pxrmediametrics record with the error and
+                    // start a new one
+                    if (mPxrAnalyticsItem != NULL) {
+                        pxr::setInt32(mPxrAnalyticsItem, "error_reason", err);
+                        pxr::setCString(mPxrAnalyticsItem, "error_action",
+                                stateString(mState).c_str());
+                        appendPxrMediaMetricsEvent(kMetricsEventCodecStop);
+                    }
+                    initPxrAnalyticsItem();
 
                     bool sendErrorResponse = true;
 
@@ -2062,6 +2404,11 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
                     if (mComponentName.c_str()) {
                         mAnalyticsItem->setCString(kCodecCodec, mComponentName.c_str());
+                        // PICO
+                        if (mPxrAnalyticsItem != NULL) {
+                            pxr::setCString(mPxrAnalyticsItem, "codec_name",
+                                    mComponentName.c_str());
+                        }
                     }
                     const char *owner = "default";
                     if (mCodecInfo !=NULL)
@@ -2079,10 +2426,18 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                         mFlags |= kFlagIsSecure;
                         resourceType = MediaResource::kSecureCodec;
                         mAnalyticsItem->setInt32(kCodecSecure, 1);
+                        // PICO
+                        if (mPxrAnalyticsItem != NULL) {
+                            pxr::setInt32(mPxrAnalyticsItem, "is_protected", 1);
+                        }
                     } else {
                         mFlags &= ~kFlagIsSecure;
                         resourceType = MediaResource::kNonSecureCodec;
                         mAnalyticsItem->setInt32(kCodecSecure, 0);
+                        // PICO
+                        if (mPxrAnalyticsItem != NULL) {
+                            pxr::setInt32(mPxrAnalyticsItem, "is_protected", 0);
+                        }
                     }
 
                     if (mIsVideo) {
@@ -2141,6 +2496,8 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                                 }
                             }
                     }
+                    // PICO
+                    appendPxrMediaMetricsEvent(kMetricsEventCodecConfigure);
                     break;
                 }
 
@@ -2233,6 +2590,10 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                         notify->setMessage("data", msg);
                         notify->post();
                     }
+                    // PICO: accumulate the rendering time of the frames
+                    if (mState == STARTED) {
+                        updatePlaybackDuration(msg);
+                    }
                     break;
                 }
 
@@ -2308,7 +2669,8 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
                     if (mOutputFormat != buffer->format()) {
                         mOutputFormat = buffer->format();
-                        ALOGV("[%s] output format changed to: %s",
+                        // PICO: logged at debug level
+                        ALOGD("[%s] output format changed to: %s",
                                 mComponentName.c_str(), mOutputFormat->debugString(4).c_str());
 
                         if (mSoftRenderer == NULL &&
@@ -2371,6 +2733,19 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                         } else {
                             mFlags |= kFlagOutputFormatChanged;
                             postActivityNotificationIfPossible();
+                        }
+
+                        // PICO: report the new output size
+                        int32_t formatWidth, formatHeight;
+                        if (mOutputFormat->findInt32("width", &formatWidth)
+                                && mOutputFormat->findInt32("height", &formatHeight)) {
+                            ALOGD("on output format change, width: %d, height: %d",
+                                    formatWidth, formatHeight);
+                            pxr::setInt32(mPxrAnalyticsItem, "video_width", formatWidth);
+                            pxr::setInt32(mPxrAnalyticsItem, "video_height", formatHeight);
+                            pxr::setCString(mPxrAnalyticsItem, kPxrKeyEvent,
+                                    kPxrEventInformationChange);
+                            submitPxrAnalyticsItem();
                         }
 
                         // Notify mCrypto of video resolution changes
@@ -2657,6 +3032,9 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                             if (err == OK) {
                                 (void)disconnectFromSurface();
                                 mSurface = surface;
+                                // PICO
+                                mUseSurface = true;
+                                updateSurfaceInfo(mSurface);
                             }
                         }
                     }
@@ -2717,6 +3095,8 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
             mReplyID = replyID;
             setState(STARTING);
+            // PICO: report the stream again once it has been rendered for 3 s
+            mPerformanceReported = false;
 
             mCodec->initiateStart();
             break;
@@ -3057,6 +3437,8 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
             mCodec->signalFlush();
             returnBuffersToCodec();
+            // PICO: vote the VR type again from the next output frames
+            mVrTypeList.clear();
             break;
         }
 
@@ -3155,6 +3537,44 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                     removeResource(MediaResource::kBattery, MediaResource::kVideoCodec, 1);
                 });
             }
+            break;
+        }
+
+        case kWhatCodecPerformanceNotify:
+        {
+            // PICO: once per second, record the output fps and (low latency mode
+            // only) the average decode latency of the last second; after
+            // kPerfDataCount samples the performance record is sent.
+            int16_t avgLatencyMs = -1;
+            if (mLowLatency) {
+                int16_t latencyCount = mPerfSamples.mLatencyCount;
+                int32_t count = latencyCount < kRecentLatencyFrames
+                        ? latencyCount : kRecentLatencyFrames;
+                if (latencyCount > 0) {
+                    int16_t totalLatencyMs = 0;
+                    for (int32_t i = 0; i < count; i++) {
+                        int32_t slot = (mLastRecentHead + i) % kRecentLatencyFrames;
+                        totalLatencyMs = (int16_t)(totalLatencyMs + mRecentSamples[slot] / 1000);
+                    }
+                    mLastRecentHead = mRecentHead;
+                    avgLatencyMs = (int16_t)(totalLatencyMs / count);
+                }
+            }
+            ALOGI("kWhatCodecPerformanceNotify, fps: %d, avgLatencyMs: %d",
+                    mPerfSamples.mFrameCount, avgLatencyMs);
+
+            if (mPerfDataIndex >= kPerfDataCount) {
+                appendPxrMediaMetricsEvent(kMetricsEventPerformanceUpdate);
+                mPerfDataIndex = 0;
+            }
+            mPerfSamples.mFps[mPerfDataIndex] = mPerfSamples.mFrameCount;
+            mPerfSamples.mLatencyMs[mPerfDataIndex] = avgLatencyMs;
+            mPerfDataIndex++;
+            mPerfSamples.mFrameCount = 0;
+            mPerfSamples.mLatencyCount = 0;
+
+            sp<AMessage> perfMsg = new AMessage(kWhatCodecPerformanceNotify, this);
+            perfMsg->post(1000000);
             break;
         }
 
@@ -3602,6 +4022,8 @@ status_t MediaCodec::disconnectFromSurface() {
         }
         // assume disconnected even on error
         mSurface.clear();
+        // PICO
+        mUseSurface = false;
     }
     return err;
 }
@@ -3615,6 +4037,9 @@ status_t MediaCodec::handleSetSurface(const sp<Surface> &surface) {
         err = connectToSurface(surface);
         if (err == OK) {
             mSurface = surface;
+            // PICO
+            mUseSurface = true;
+            updateSurfaceInfo(mSurface);
         }
     }
     return err;
@@ -3650,6 +4075,9 @@ void MediaCodec::onOutputBufferAvailable() {
 
         int32_t flags;
         CHECK(buffer->meta()->findInt32("flags", &flags));
+
+        // PICO
+        updateVrTypeCalculator(flags);
 
         msg->setInt32("flags", flags);
 
