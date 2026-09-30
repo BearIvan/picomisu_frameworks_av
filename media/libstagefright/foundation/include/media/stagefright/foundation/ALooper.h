@@ -58,6 +58,10 @@ struct ALooper : public RefBase {
         return mName.c_str();
     }
 
+    // PICO OS 5.13.7: id of the started looper thread (waits until the thread
+    // has started running); 0 when the looper has no own thread.
+    android_thread_id_t getThreadId();
+
 protected:
     virtual ~ALooper();
 

@@ -71,6 +71,9 @@ struct AImageReader : public RefBase {
 
     media_status_t getWindowNativeHandle(/*out*/native_handle_t **handle);
 
+    // PICO OS 5.13.7: run the callback looper thread with SCHED_FIFO priority 26.
+    media_status_t setRtMode(bool enable);
+
     ANativeWindow* getWindow()    const { return mWindow.get(); };
     int32_t        getWidth()     const { return mWidth; };
     int32_t        getHeight()    const { return mHeight; };

@@ -41,9 +41,21 @@ struct ALooper::LooperThread : public Thread {
     }
 
     virtual status_t readyToRun() {
-        mThreadId = androidGetThreadId();
+        {
+            Mutex::Autolock autoLock(mThreadIdLock);
+            mThreadId = androidGetThreadId();
+            mThreadIdCondition.broadcast();
+        }
 
         return Thread::readyToRun();
+    }
+
+    android_thread_id_t waitThreadId() {
+        Mutex::Autolock autoLock(mThreadIdLock);
+        while (mThreadId == NULL) {
+            mThreadIdCondition.wait(mThreadIdLock);
+        }
+        return mThreadId;
     }
 
     virtual bool threadLoop() {
@@ -60,9 +72,19 @@ protected:
 private:
     ALooper *mLooper;
     android_thread_id_t mThreadId;
+    Mutex mThreadIdLock;
+    Condition mThreadIdCondition;
 
     DISALLOW_EVIL_CONSTRUCTORS(LooperThread);
 };
+
+android_thread_id_t ALooper::getThreadId() {
+    LooperThread *thread = mThread.get();
+    if (thread == NULL) {
+        return NULL;
+    }
+    return thread->waitThreadId();
+}
 
 // static
 int64_t ALooper::GetNowUs() {

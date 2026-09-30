@@ -15,6 +15,8 @@
  */
 
 #include <inttypes.h>
+#include <pthread.h>
+#include <sched.h>
 
 //#define LOG_NDEBUG 0
 #define LOG_TAG "NdkImageReader"
@@ -863,6 +865,33 @@ media_status_t AImageReader_setImageListener(
 
     reader->setImageListener(listener);
     return AMEDIA_OK;
+}
+
+media_status_t
+AImageReader::setRtMode(bool enable) {
+    if (enable) {
+        struct sched_param param = {};
+        param.sched_priority = 26;
+        int ret = pthread_setschedparam(reinterpret_cast<pthread_t>(mCbLooper->getThreadId()),
+                                        SCHED_FIFO, &param);
+        if (ret != 0) {
+            ALOGE("rt mode update err %d", ret);
+        }
+    }
+    return AMEDIA_OK;
+}
+
+// PICO OS 5.13.7 (libpvrtrackingcamera): real-time image callbacks.
+extern "C" media_status_t AImageReader_setRtMode(AImageReader* reader, bool enable);
+
+EXPORT
+media_status_t AImageReader_setRtMode(AImageReader* reader, bool enable) {
+    ALOGV("%s", __FUNCTION__);
+    if (reader == nullptr) {
+        ALOGE("%s: invalid argument! reader %p", __FUNCTION__, reader);
+        return AMEDIA_ERROR_INVALID_PARAMETER;
+    }
+    return reader->setRtMode(enable);
 }
 
 EXPORT
