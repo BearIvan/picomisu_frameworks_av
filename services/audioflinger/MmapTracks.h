@@ -48,7 +48,10 @@ public:
 
                         // protected by MMapThread::mLock
             void        setSilenced_l(bool silenced) { mSilenced = silenced;
-                                                       mSilencedNotified = false;}
+                                                       mSilencedNotified = false;
+                            // PICO: audio event tracking
+                            pico::audioeventtracking::AudioEventTrackerBridge::
+                                    onCaptureSilenced(mPortId, silenced); }
                         // protected by MMapThread::mLock
             bool        isSilenced_l() const { return mSilenced; }
                         // protected by MMapThread::mLock

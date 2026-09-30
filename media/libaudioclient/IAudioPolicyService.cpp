@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include <android/media/INativeSpatializerCallback.h>
 #include <android/media/ISpatializer.h>
@@ -112,6 +113,7 @@ enum {
     GET_SPATIALIZER,
     CAN_BE_SPATIALIZED,
     GET_SPATIALIZER_SERVICE,
+    SET_PARAMETERS_TO_POLICY,   // 77
 };
 
 #define MAX_ITEMS_PER_LIST 1024
@@ -1007,6 +1009,14 @@ public:
         return reply.readInt32();
     }
 
+    virtual void setParameters(const String8& keyValuePairs)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioPolicyService::getInterfaceDescriptor());
+        data.writeString8(keyValuePairs);
+        remote()->transact(SET_PARAMETERS_TO_POLICY, data, &reply);
+    }
+
     virtual status_t getHwOffloadEncodingFormatsSupportedForA2DP(
                 std::vector<audio_format_t> *formats)
     {
@@ -1373,6 +1383,11 @@ IMPLEMENT_META_INTERFACE(AudioPolicyService, "android.media.IAudioPolicyService"
 
 // The audio policy service of this build has no PICO record silencing and no spatializer
 // (see IAudioPolicyService.h): the in-process results of an audio policy service without them.
+void BnAudioPolicyService::setParameters(const String8& keyValuePairs)
+{
+    ALOGW("setParameters(%s): not supported by the audio policy service", keyValuePairs.string());
+}
+
 void BnAudioPolicyService::setRecordSilencedByName(const char *packageName, bool silenced)
 {
     ALOGW("setRecordSilencedByName(%s, %d): not supported by the audio policy service",
@@ -1472,7 +1487,19 @@ status_t BnAudioPolicyService::onTransact(
             break;
     }
 
-    std::string tag("IAudioPolicyService command " + std::to_string(code));
+    // PICO: the watchdog tag names the caller
+    std::string tag("IAudioPolicyService command " + std::to_string(code) + " , CallingPID "
+            + std::to_string(IPCThreadState::self()->getCallingPid()) + " , TID "
+            + std::to_string(gettid()));
+    if (code == SET_PARAMETERS_TO_POLICY) {
+        CHECK_INTERFACE(IAudioPolicyService, data, reply);
+        String8 keyValuePairs(data.readString8());
+        tag.append("-");
+        tag.append(keyValuePairs.string());
+        TimeCheck check(tag.c_str());
+        setParameters(keyValuePairs);
+        return NO_ERROR;
+    }
     TimeCheck check(tag.c_str());
 
     switch (code) {

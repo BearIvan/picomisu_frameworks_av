@@ -1539,6 +1539,13 @@ status_t AudioSystem::setRttEnabled(bool enabled)
     return aps->setRttEnabled(enabled);
 }
 
+void AudioSystem::setParametersToPolicy(const String8& keyValuePairs)
+{
+    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
+    if (aps == 0) return;
+    aps->setParameters(keyValuePairs);
+}
+
 status_t AudioSystem::setRecordSilenced(const char *packageName, bool silenced)
 {
     const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();

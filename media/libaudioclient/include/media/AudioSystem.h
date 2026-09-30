@@ -408,6 +408,10 @@ public:
     // (IAudioPolicyService transactions 73..75).
     static status_t setRecordSilenced(const char *packageName, bool silenced);
 
+    // PICO: forwards key/value pairs to the audio policy manager (factory transaction 77),
+    // used by AudioFlinger::setParameters() for "audioProxy".
+    static void setParametersToPolicy(const String8& keyValuePairs);
+
     /**
      * Get the ISpatializer interface from the audio policy service.
      * @param callback the callback to receive state updates if the ISpatializer is returned.

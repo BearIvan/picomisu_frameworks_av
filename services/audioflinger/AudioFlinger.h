@@ -83,6 +83,7 @@
 #include "SpdifStreamOut.h"
 #include "AudioHwDevice.h"
 #include "NBAIO_Tee.h"
+#include "PicoAudioEventTracker.h"
 
 #include <powermanager/IPowerManager.h>
 
@@ -163,6 +164,10 @@ public:
     virtual     bool        getMicMute() const;
 
     virtual     void        setRecordSilenced(uid_t uid, bool silenced);
+    // PICO
+    virtual     int         getRecordThreadstate() const { return mRecordThreadState; }
+    virtual     void        setRecordThreadstate(int state);
+    virtual     void        setRecordSilencedBySessionId(uid_t sessionId, bool silenced);
 
     virtual     status_t    setParameters(audio_io_handle_t ioHandle, const String8& keyValuePairs);
     virtual     String8     getParameters(audio_io_handle_t ioHandle, const String8& keys) const;
@@ -304,6 +309,8 @@ public:
     static int onExternalVibrationStart(const sp<os::ExternalVibration>& externalVibration);
     static void onExternalVibrationStop(const sp<os::ExternalVibration>& externalVibration);
 private:
+    // PICO: record thread state, "key_rtState" parameter mirrored to vendor.audio.rt.state
+    int                 mRecordThreadState;
     // FIXME The 400 is temporarily too high until a leak of writers in media.log is fixed.
     static const size_t kLogMemorySize = 400 * 1024;
     sp<MemoryDealer>    mLogMemoryDealer;   // == 0 when NBLog is disabled

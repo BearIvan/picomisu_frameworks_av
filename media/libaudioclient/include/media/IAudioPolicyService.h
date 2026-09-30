@@ -209,6 +209,10 @@ public:
                                         std::vector<audio_format_t> *formats) = 0;
     virtual status_t setSurroundFormatEnabled(audio_format_t audioFormat, bool enabled) = 0;
 
+    // PICO: parameters for the audio policy manager (AudioSystem::setParametersToPolicy()),
+    // factory transaction 77.
+    virtual void setParameters(const String8& keyValuePairs) = 0;
+
     virtual status_t setAssistantUid(uid_t uid) = 0;
     virtual status_t setA11yServicesUids(const std::vector<uid_t>& uids) = 0;
 
@@ -251,6 +255,7 @@ public:
     // The audio policy service of this build has neither the PICO record silencing nor
     // the spatializer: onTransact() does not dispatch the transactions 73..76 (clients get
     // UNKNOWN_TRANSACTION) and in-process callers get these "not available" results.
+    virtual void setParameters(const String8& keyValuePairs);
     virtual void setRecordSilencedByName(const char *packageName, bool silenced);
     virtual status_t getSpatializer(const sp<media::INativeSpatializerCallback>& callback,
                                     sp<media::ISpatializer>* spatializer);

@@ -82,6 +82,7 @@
 #endif
 
 #include "AutoPark.h"
+#include "AudioDumpUtils.h"
 
 #include <pthread.h>
 #include "TypedLogger.h"
@@ -688,6 +689,9 @@ void AudioFlinger::ThreadBase::processConfigEvents_l()
             mLocalLog.log("CFG_EVENT_CREATE_AUDIO_PATCH: old device %#x (%s) new device %#x (%s)",
                     (unsigned)oldDevice, toString(oldDevice).c_str(),
                     (unsigned)newDevice, toString(newDevice).c_str());
+            // PICO: audio event tracking
+            pico::audioeventtracking::AudioEventTrackerBridge::onDeviceChanged(
+                    mId, oldDevice, newDevice);
         } break;
         case CFG_EVENT_RELEASE_AUDIO_PATCH: {
             const audio_devices_t oldDevice = getDevice();
@@ -2975,6 +2979,15 @@ ssize_t AudioFlinger::PlaybackThread::threadLoop_write()
             ALOG_ASSERT(mCallbackThread != 0);
             mCallbackThread->setWriteBlocked(mWriteAckSequence);
         }
+    }
+
+    // PICO: PCM dump of the mixed output (pico.audio.dump.af_mixerd_pcm)
+    if (audioDataDump::isDumpEnabled("pico.audio.dump.af_mixerd_pcm") && bytesWritten > 0) {
+        char path[128];
+        const int n = sprintf(path, "%s%s-s%d_f%x_c%x.raw", audioDataDump::kAudioDumpDir,
+                              "af_dump_mixerd_pcm", mSampleRate, mFormat, mChannelMask);
+        path[n] = '\0';
+        audioDataDump::dumpAudioPcm(path, (char *)mSinkBuffer + offset, bytesWritten);
     }
 
     mNumWrites++;
@@ -7237,6 +7250,16 @@ reacquire_wakelock:
             }
         }
 
+        // PICO: PCM dump of the capture (pico.audio.dump.af_record_pcm)
+        if (audioDataDump::isDumpEnabled("pico.audio.dump.af_record_pcm")) {
+            char path[128];
+            const int n = sprintf(path, "%s%s-s%d_f%x_c%x.raw", audioDataDump::kAudioDumpDir,
+                                  "af_dump_record_pcm", mSampleRate, mFormat, mChannelMask);
+            path[n] = '\0';
+            audioDataDump::dumpAudioPcm(path, (char *)mRsmpInBuffer + rear * mFrameSize,
+                                        mBufferSize);
+        }
+
         const int64_t lastIoEndNs = systemTime(); // end IO timing
 
         // Update server timestamp with server stats
@@ -8037,6 +8060,21 @@ void AudioFlinger::RecordThread::setRecordSilenced(uid_t uid, bool silenced)
         sp<RecordTrack> track = mTracks[i];
         if (track != 0 && track->uid() == uid) {
             track->setSilenced(silenced);
+        }
+    }
+}
+
+// PICO
+void AudioFlinger::RecordThread::setRecordSilencedBySessionId(uid_t sessionId, bool silenced)
+{
+    ALOGD("setRecordSilencedBySessionId sessionid %d. silenced %d size %zu", sessionId, silenced,
+          mTracks.size());
+    Mutex::Autolock _l(mLock);
+    for (size_t i = 0; i < mTracks.size() ; i++) {
+        sp<RecordTrack> track = mTracks[i];
+        if (track != 0 && (uid_t)track->sessionId() == sessionId) {
+            track->setSilenced(silenced);
+            ALOGD("setRecordSilencedByName in AudioFlinger::RecordThread, find it!");
         }
     }
 }
@@ -9578,6 +9616,22 @@ void AudioFlinger::MmapCaptureThread::setRecordSilenced(uid_t uid, bool silenced
     Mutex::Autolock _l(mLock);
     for (size_t i = 0; i < mActiveTracks.size() ; i++) {
         if (mActiveTracks[i]->uid() == uid) {
+            mActiveTracks[i]->setSilenced_l(silenced);
+            broadcast_l();
+        }
+    }
+}
+
+// PICO
+void AudioFlinger::MmapCaptureThread::setRecordSilencedBySessionId(uid_t sessionId,
+                                                                   bool silenced)
+{
+    ALOGD("setRecordSilencedBySessionId sessionid %d. silenced %d size %zu", sessionId, silenced,
+          mActiveTracks.size());
+    Mutex::Autolock _l(mLock);
+    for (size_t i = 0; i < mActiveTracks.size() ; i++) {
+        if ((uid_t)mActiveTracks[i]->sessionId() == sessionId) {
+            ALOGD("setRecordSilencedByName in AudioFlinger::MmapCaptureThread, find it!");
             mActiveTracks[i]->setSilenced_l(silenced);
             broadcast_l();
         }

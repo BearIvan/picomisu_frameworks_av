@@ -50,6 +50,9 @@ enum {
     SET_MIC_MUTE,
     GET_MIC_MUTE,
     SET_RECORD_SILENCED,
+    // PICO OS 5.13.7 (factory codes 20 and 21, the following codes are shifted by 2)
+    GET_RECORD_THREADSTATE,
+    SET_RECORD_SILENCED_BY_SESSION_ID,
     SET_PARAMETERS,
     GET_PARAMETERS,
     REGISTER_CLIENT,
@@ -347,6 +350,23 @@ public:
         data.writeInt32(uid);
         data.writeInt32(silenced ? 1 : 0);
         remote()->transact(SET_RECORD_SILENCED, data, &reply);
+    }
+
+    virtual int getRecordThreadstate() const
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioFlinger::getInterfaceDescriptor());
+        remote()->transact(GET_RECORD_THREADSTATE, data, &reply);
+        return reply.readInt32();
+    }
+
+    virtual void setRecordSilencedBySessionId(uid_t sessionId, bool silenced)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioFlinger::getInterfaceDescriptor());
+        data.writeInt32(sessionId);
+        data.writeInt32(silenced ? 1 : 0);
+        remote()->transact(SET_RECORD_SILENCED_BY_SESSION_ID, data, &reply);
     }
 
     virtual status_t setParameters(audio_io_handle_t ioHandle, const String8& keyValuePairs)
@@ -1162,6 +1182,21 @@ status_t BnAudioFlinger::onTransact(
             data.read(&source, sizeof(audio_source_t));
             bool silenced = data.readInt32() == 1;
             setRecordSilenced(uid, silenced);
+            return NO_ERROR;
+        } break;
+        case GET_RECORD_THREADSTATE: {
+            CHECK_INTERFACE(IAudioFlinger, data, reply);
+            reply->writeInt32(getRecordThreadstate());
+            return NO_ERROR;
+        } break;
+        case SET_RECORD_SILENCED_BY_SESSION_ID: {
+            CHECK_INTERFACE(IAudioFlinger, data, reply);
+            uid_t sessionId = data.readInt32();
+            // same parcel layout as SET_RECORD_SILENCED, as in the factory
+            audio_source_t source;
+            data.read(&source, sizeof(audio_source_t));
+            bool silenced = data.readInt32() == 1;
+            setRecordSilencedBySessionId(sessionId, silenced);
             return NO_ERROR;
         } break;
         case SET_PARAMETERS: {

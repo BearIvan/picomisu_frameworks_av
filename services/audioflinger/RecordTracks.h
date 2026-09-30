@@ -101,7 +101,14 @@ public:
             bool        isDirect() const override
                                 { return (mFlags & AUDIO_INPUT_FLAG_DIRECT) != 0; }
 
-            void        setSilenced(bool silenced) { if (!isPatchTrack()) mSilenced = silenced; }
+            void        setSilenced(bool silenced) {
+                            if (!isPatchTrack()) {
+                                mSilenced = silenced;
+                                // PICO: audio event tracking
+                                pico::audioeventtracking::AudioEventTrackerBridge::
+                                        onCaptureSilenced(mPortId, silenced);
+                            }
+                        }
             bool        isSilenced() const;
 
             status_t    getActiveMicrophones(std::vector<media::MicrophoneInfo>* activeMicrophones);

@@ -385,6 +385,10 @@ public:
     virtual     status_t    setMicMute(bool state) = 0;
     virtual     bool        getMicMute() const = 0;
     virtual     void        setRecordSilenced(uid_t uid, bool silenced) = 0;
+    // PICO: record thread state ("key_rtState", vendor.audio.rt.state) and record silencing
+    // of the tracks of an audio session (AudioPolicyService::setRecordSilencedByName()).
+    virtual     int         getRecordThreadstate() const = 0;
+    virtual     void        setRecordSilencedBySessionId(uid_t sessionId, bool silenced) = 0;
 
     virtual     status_t    setParameters(audio_io_handle_t ioHandle,
                                     const String8& keyValuePairs) = 0;

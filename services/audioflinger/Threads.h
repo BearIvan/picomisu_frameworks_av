@@ -1626,6 +1626,8 @@ public:
 
             // Sets the UID records silence
             void        setRecordSilenced(uid_t uid, bool silenced);
+            // PICO: Sets the records silence of an audio session
+            void        setRecordSilencedBySessionId(uid_t sessionId, bool silenced);
 
             status_t    getActiveMicrophones(std::vector<media::MicrophoneInfo>* activeMicrophones);
 
@@ -1795,6 +1797,9 @@ class MmapThread : public ThreadBase
 
                 // Sets the UID records silence
     virtual     void        setRecordSilenced(uid_t uid __unused, bool silenced __unused) {}
+                // PICO: Sets the records silence of an audio session
+    virtual     void        setRecordSilencedBySessionId(uid_t sessionId __unused,
+                                                         bool silenced __unused) {}
 
  protected:
                 void        dumpInternals_l(int fd, const Vector<String16>& args) override;
@@ -1882,6 +1887,8 @@ public:
                 void           updateMetadata_l() override;
                 void           processVolume_l() override;
                 void           setRecordSilenced(uid_t uid, bool silenced) override;
+                void           setRecordSilencedBySessionId(uid_t sessionId,
+                                                            bool silenced) override;
 
     virtual     void           toAudioPortConfig(struct audio_port_config *config);
 

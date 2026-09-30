@@ -50,6 +50,8 @@
 
 #include "AudioFlinger.h"
 #include "NBAIO_Tee.h"
+#include "AudioDumpUtils.h"
+#include "HapticEffect.h"
 
 #include <media/AudioResamplerPublic.h>
 
@@ -152,6 +154,7 @@ std::string formatToString(audio_format_t format) {
 
 AudioFlinger::AudioFlinger()
     : BnAudioFlinger(),
+      mRecordThreadState(1),
       mMediaLogNotifier(new AudioFlinger::MediaLogNotifier()),
       mPrimaryHardwareDev(NULL),
       mAudioHwDevs(NULL),
@@ -191,6 +194,13 @@ AudioFlinger::AudioFlinger()
     mEffectsFactoryHal = EffectsFactoryHalInterface::create();
 
     mMediaLogNotifier->run("MediaLogNotifier");
+
+    // PICO: restore the record thread state of a previous audio server instance
+    char value[PROPERTY_VALUE_MAX] = {};
+    if (property_get("vendor.audio.rt.state", value, nullptr) != 0) {
+        mRecordThreadState = atoi(value);
+    }
+    ALOGD("vendor.audio.test. val_state %s mRecordThreadState %d", value, mRecordThreadState);
 }
 
 void AudioFlinger::onFirstRef()
@@ -1162,7 +1172,9 @@ bool AudioFlinger::getMicMute() const
 
 void AudioFlinger::setRecordSilenced(uid_t uid, bool silenced)
 {
-    ALOGV("AudioFlinger::setRecordSilenced(uid:%d, silenced:%d)", uid, silenced);
+    // PICO: logged at debug level
+    ALOGD("AudioFlinger::setRecordSilenced(uid:%d, silenced:%d size %zu)", uid, silenced,
+          mRecordThreads.size());
 
     AutoMutex lock(mLock);
     for (size_t i = 0; i < mRecordThreads.size(); i++) {
@@ -1170,6 +1182,37 @@ void AudioFlinger::setRecordSilenced(uid_t uid, bool silenced)
     }
     for (size_t i = 0; i < mMmapThreads.size(); i++) {
         mMmapThreads[i]->setRecordSilenced(uid, silenced);
+    }
+}
+
+// PICO: record silencing of the tracks of an audio session, used by
+// AudioPolicyService::setRecordSilencedByName() (AudioSystem::setRecordSilenced()).
+void AudioFlinger::setRecordSilencedBySessionId(uid_t sessionId, bool silenced)
+{
+    ALOGD("AudioFlinger::setRecordSilencedBySessionId(sessionid:%d, silenced:%d size %zu)",
+          sessionId, silenced, mRecordThreads.size());
+
+    AutoMutex lock(mLock);
+    for (size_t i = 0; i < mRecordThreads.size(); i++) {
+        mRecordThreads[i]->setRecordSilencedBySessionId(sessionId, silenced);
+    }
+    for (size_t i = 0; i < mMmapThreads.size(); i++) {
+        mMmapThreads[i]->setRecordSilencedBySessionId(sessionId, silenced);
+    }
+}
+
+// PICO: "key_rtState=0|1", persisted in vendor.audio.rt.state
+void AudioFlinger::setRecordThreadstate(int state)
+{
+    char value[4] = {};
+    AutoMutex lock(mLock);
+    if ((unsigned int)state <= 1) {
+        mRecordThreadState = state;
+        sprintf(value, "%d", state);
+        property_set("vendor.audio.rt.state", value);
+        ALOGD("setRecordThreadstate state %d, %s", state, value);
+    } else {
+        ALOGE("setRecordThreadstate: Error param %d", state);
     }
 }
 
@@ -1427,6 +1470,19 @@ void AudioFlinger::logFilteredParameters(size_t originalKVPSize, const String8& 
 
 status_t AudioFlinger::setParameters(audio_io_handle_t ioHandle, const String8& keyValuePairs)
 {
+    // PICO: session of the Phoenix VCMotor haptic effect player (no permission check)
+    {
+        AudioParameter hapticParam = AudioParameter(keyValuePairs);
+        int hapticSessionId;
+        if (hapticParam.getInt(String8("key_setHapticEffectSessionId"), hapticSessionId)
+                == NO_ERROR) {
+            HapticEffect::getInstance().setSessionId(hapticSessionId);
+            ALOGD("%s: [Phoenix_VCMotor_Audio] setParameters return. keyValue = %s",
+                  __func__, keyValuePairs.string());
+            return NO_ERROR;
+        }
+    }
+
     ALOGV("setParameters(): io %d, keyvalue %s, calling pid %d calling uid %d",
             ioHandle, keyValuePairs.string(),
             IPCThreadState::self()->getCallingPid(), IPCThreadState::self()->getCallingUid());
@@ -1441,8 +1497,33 @@ status_t AudioFlinger::setParameters(audio_io_handle_t ioHandle, const String8& 
 
     ALOGV("%s: filtered keyvalue %s", __func__, filteredKeyValuePairs.string());
 
+    // PICO: the audio proxy (cast) routing rule is also passed to the audio policy
+    // (AudioPolicyManager::setParameters(), "audioProxy")
+    {
+        AudioParameter proxyParam = AudioParameter(filteredKeyValuePairs);
+        int audioProxy = 0;
+        if (proxyParam.getInt(String8("audioProxy"), audioProxy) == NO_ERROR) {
+            AudioSystem::setParametersToPolicy(keyValuePairs);
+        }
+    }
+    // PICO: PCM dump control ("ut_enable_audio_dump", "audio_dump_file_upload_done")
+    audioDataDump::setParameters(filteredKeyValuePairs);
+
     // AUDIO_IO_HANDLE_NONE means the parameters are global to the audio hardware interface
     if (ioHandle == AUDIO_IO_HANDLE_NONE) {
+        // PICO: record thread state
+        {
+            AudioParameter rtParam = AudioParameter(filteredKeyValuePairs);
+            int rtState = 0;
+            ALOGD("%s: filtered keyvalue %s", __func__, filteredKeyValuePairs.string());
+            if (rtParam.getInt(String8("key_rtState"), rtState) == NO_ERROR) {
+                ALOGD("%s: RecordThreadState %s", __func__, filteredKeyValuePairs.string());
+                if ((unsigned int)rtState <= 1) {
+                    setRecordThreadstate(rtState);
+                }
+                return NO_ERROR;
+            }
+        }
         Mutex::Autolock _l(mLock);
         // result will remain NO_INIT if no audio device is present
         status_t final_result = NO_INIT;
@@ -1515,6 +1596,19 @@ String8 AudioFlinger::getParameters(audio_io_handle_t ioHandle, const String8& k
 {
     ALOGVV("getParameters() io %d, keys %s, calling pid %d",
             ioHandle, keys.string(), IPCThreadState::self()->getCallingPid());
+
+    // PICO: session of the Phoenix VCMotor haptic effect player
+    if (ioHandle == AUDIO_IO_HANDLE_NONE &&
+            strcmp(keys.string(), String8("key_getHapticEffectSessionId").string()) == 0) {
+        String8 out_s8;
+        char value[12];
+        if (snprintf(value, sizeof(value), "%d", HapticEffect::getInstance().getSessionId()) > 0) {
+            out_s8 = String8(value);
+        }
+        ALOGD("%s: [Phoenix_VCMotor_Audio] getParameters return. keys = %s, value = %s",
+              __func__, keys.string(), out_s8.string());
+        return out_s8;
+    }
 
     Mutex::Autolock _l(mLock);
 
@@ -2541,6 +2635,8 @@ status_t AudioFlinger::closeOutput_nonvirtual(audio_io_handle_t output)
         // from now on thread->mOutput is NULL
         delete out;
     }
+    // PICO: audio event tracking
+    pico::audioeventtracking::AudioEventTrackerBridge::onAudioFlingerThreadClosed(output);
     return NO_ERROR;
 }
 
@@ -2792,6 +2888,8 @@ status_t AudioFlinger::closeInput_nonvirtual(audio_io_handle_t input)
         // from now on thread->mInput is NULL
         delete in;
     }
+    // PICO: audio event tracking
+    pico::audioeventtracking::AudioEventTrackerBridge::onAudioFlingerThreadClosed(input);
     return NO_ERROR;
 }
 
