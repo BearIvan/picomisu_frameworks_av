@@ -77,7 +77,9 @@ public:
                                 audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE,
                                 /** default behaviour is to start when there are as many frames
                                   * ready as possible (aka. Buffer is full). */
-                                size_t frameCountToBeReady = SIZE_MAX);
+                                size_t frameCountToBeReady = SIZE_MAX,
+                                // PICO: on the spatializer output for spatialization
+                                bool isSpatialized = false);
     virtual             ~Track();
     virtual status_t    initCheck() const;
 
@@ -180,6 +182,14 @@ public:
             void    setVCMotorTrackEnabled(bool enabled) { mVCMotorTrackEnabled = enabled; }
             /** A VCMotor track is mixed at full volume even when its stream is muted. */
             bool    isVCMotorTrackEnabled() const { return mVCMotorTrackEnabled; }
+
+            // PICO: spatial audio backport
+            bool    isSpatialized() const override { return mIsSpatialized; }
+            void    setRequestEnableSpatialization(bool enabled) override {
+                        mIsSpatialized = enabled; }
+            bool    isSpatializationEnabled() const override { return mSpatializationEnabled; }
+            void    setEnabledSpatialization(bool enabled) override {
+                        mSpatializationEnabled = enabled; }
 
 protected:
     // for numerous
@@ -319,10 +329,11 @@ private:
     TeePatches  mTeePatches;
 
     // PICO: factory Track fields (factory offsets for reference; the factory Track also has
-    // a float at 0x350 (playback speed, Android 11 secondary outputs), not ported, and the
-    // spatialization flags at 0x37c/0x37d).
+    // a float at 0x350 (playback speed, Android 11 secondary outputs), not ported).
     Mutex               mTeePatchesLock;        // 0x354: mTeePatches in interceptBuffer()
                                                 // and setTeePatches()
+    bool                mIsSpatialized;               // 0x37c: PICO spatialization requested
+    bool                mSpatializationEnabled = false; // 0x37d: spatialized by the mixer
     bool                mVCMotorTrackEnabled = false; // 0x37e: see setVCMotorTrackEnabled()
     int                 mVCMotorSlot = 3;       // 0x380: both motors
     int                 mVCMotorReversal = 0;   // 0x384: no channel swap

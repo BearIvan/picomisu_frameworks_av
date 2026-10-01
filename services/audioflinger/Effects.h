@@ -101,6 +101,19 @@ public:
                     { mThread = thread; mThreadType = thread.promote()->type(); }
     const wp<ThreadBase>& thread() { return mThread; }
 
+    // PICO: output buffer access mode required by the current buffers: overwrite when the
+    // input and output buffers are the same, accumulate otherwise
+    uint32_t    requiredEffectBufferAccessMode() const {
+                    return mConfig.inputCfg.buffer.raw == mConfig.outputCfg.buffer.raw
+                            ? EFFECT_BUFFER_ACCESS_WRITE : EFFECT_BUFFER_ACCESS_ACCUMULATE;
+                }
+    // PICO: reconfigures the effect if the access mode does not match the buffers
+    void        updateAccessMode() {
+                    if (requiredEffectBufferAccessMode() != mConfig.outputCfg.accessMode) {
+                        configure();
+                    }
+                }
+
     status_t addHandle(EffectHandle *handle);
     ssize_t  disconnectHandle(EffectHandle *handle, bool unpinIfLast);
     ssize_t removeHandle(EffectHandle *handle);
@@ -158,6 +171,12 @@ private:
     status_t start_l();
     status_t stop_l();
     status_t remove_effect_from_hal_l();
+
+    // PICO: spatial audio backport, input and output channel masks of the effect configuration:
+    // the mixer channel mask of a spatializer thread for the spatialized sessions and for the
+    // first effect (spatializer) of the output stage, the thread (HAL) channel mask otherwise.
+    audio_channel_mask_t inChannelMask() const;
+    audio_channel_mask_t outChannelMask() const;
 
 mutable Mutex               mLock;      // mutex for process, commands and handles list protection
     wp<ThreadBase>      mThread;    // parent thread
@@ -365,6 +384,31 @@ public:
     }
     effect_buffer_t *outBuffer() const {
         return mOutBuffer != 0 ? reinterpret_cast<effect_buffer_t*>(mOutBuffer->ptr()) : NULL;
+    }
+    // PICO: spatial audio backport
+    sp<EffectBufferHalInterface> inBufferHal() const { return mInBuffer; }
+    sp<EffectBufferHalInterface> outBufferHal() const { return mOutBuffer; }
+    // PICO: applies the chain input and output buffers to the effects and reconfigures them,
+    // after the buffers of the chain changed (mixer channel mask of a spatializer thread or
+    // spatialization of the session changed)
+    void updateBuffers_l();
+    // PICO: true if the effect is the first of the chain (the spatializer of the output stage
+    // of a spatializer thread)
+    bool isFirstEffect(int id) const {
+        return !mEffects.isEmpty() && id == mEffects[0]->id();
+    }
+    // PICO: reconfigures the effects of the chain of a spatializer thread (channel masks)
+    void reconfigureSpatializerEffects() {
+        Mutex::Autolock _l(mLock);
+        sp<ThreadBase> thread = mThread.promote();
+        if (thread == 0) {
+            return;
+        }
+        for (size_t i = 0; i < mEffects.size(); i++) {
+            if (thread->type() == ThreadBase::SPATIALIZER) {
+                mEffects[i]->configure();
+            }
+        }
     }
 
     void incTrackCnt() { android_atomic_inc(&mTrackCnt); }

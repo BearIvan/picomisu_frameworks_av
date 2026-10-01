@@ -6,7 +6,10 @@ LOCAL_SRC_FILES:= \
     AudioPolicyService.cpp \
     AudioPolicyEffects.cpp \
     AudioPolicyInterfaceImpl.cpp \
-    AudioPolicyClientImpl.cpp
+    AudioPolicyClientImpl.cpp \
+    Spatializer.cpp \
+    SpatializerPoseController.cpp \
+    HeadPoseProvider.cpp
 
 LOCAL_C_INCLUDES := \
     frameworks/av/services/audioflinger \
@@ -15,7 +18,8 @@ LOCAL_C_INCLUDES := \
 LOCAL_HEADER_LIBRARIES := \
     libaudiopolicycommon \
     libaudiopolicyengine_interface_headers \
-    libaudiopolicymanager_interface_headers
+    libaudiopolicymanager_interface_headers \
+    libaudiohal_headers
 
 LOCAL_SHARED_LIBRARIES := \
     libcutils \
@@ -30,7 +34,9 @@ LOCAL_SHARED_LIBRARIES := \
     libmediametrics \
     libmediautils \
     libeffectsconfig \
-    libsensorprivacy
+    libsensorprivacy \
+    libaudiohal \
+    libstagefright_foundation
 
 LOCAL_EXPORT_SHARED_LIBRARY_HEADERS := \
     libsensorprivacy

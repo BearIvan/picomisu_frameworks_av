@@ -515,6 +515,17 @@ public:
 
     /* List available microphones and their characteristics */
     virtual status_t getMicrophones(std::vector<media::MicrophoneInfo> *microphones) = 0;
+
+    // PICO: spatial audio backport (factory transactions 63..65), called by the spatializer
+    // of the audio policy service.
+    // Recreates the track portId of the output (e.g. to move it to or from the spatializer).
+    virtual status_t invalidateTrack(audio_io_handle_t output, audio_port_handle_t portId) = 0;
+    // Sets the mixer channel mask of a spatializer output.
+    virtual status_t setMixerConfig(audio_io_handle_t output,
+                                    const audio_config_base_t& config) = 0;
+    // Enables or disables the spatialization of the track portId of a spatializer output.
+    virtual status_t setSpatializationEnabled(audio_io_handle_t output,
+                                              audio_port_handle_t portId, bool enabled) = 0;
 };
 
 

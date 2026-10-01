@@ -33,6 +33,7 @@
 #include <media/AudioPolicy.h>
 #include <mediautils/ServiceUtilities.h>
 #include "AudioPolicyEffects.h"
+#include "SpatializerPolicyCallback.h"
 #include <AudioPolicyInterface.h>
 #include <android/hardware/BnSensorPrivacyListener.h>
 
@@ -40,11 +41,14 @@
 
 namespace android {
 
+class Spatializer;   // PICO
+
 // ----------------------------------------------------------------------------
 
 class AudioPolicyService :
     public BinderService<AudioPolicyService>,
     public BnAudioPolicyService,
+    public SpatializerPolicyCallback,   // PICO: spatial audio backport
     public IBinder::DeathRecipient
 {
     friend class BinderService<AudioPolicyService>;
@@ -85,6 +89,7 @@ public:
                               audio_output_flags_t flags,
                               audio_port_handle_t *selectedDeviceId,
                               audio_port_handle_t *portId,
+                              bool *isSpatialized,
                               std::vector<audio_io_handle_t> *secondaryOutputs) override;
     virtual status_t startOutput(audio_port_handle_t portId);
     virtual status_t stopOutput(audio_port_handle_t portId);
@@ -265,6 +270,25 @@ public:
     // applied on the output command thread
     virtual void setParameters(const String8& keyValuePairs);
             void doSetParameters(const String8& keyValuePairs);
+
+    // PICO: spatial audio backport (Android 13 spatializer)
+    status_t getSpatializer(const sp<media::INativeSpatializerCallback>& callback,
+                            sp<media::ISpatializer>* spatializer) override;
+    status_t canBeSpatialized(const audio_attributes_t *attr,
+                              const audio_config_t *config,
+                              const AudioDeviceTypeAddrForSpatialVector &devices,
+                              bool *canBeSpatialized) override;
+    sp<media::ISpatializer> getSpatializer() override;
+
+    // SpatializerPolicyCallback
+    void onCheckSpatializer() override;
+    status_t onSetSpatializationEnabled(audio_io_handle_t output, audio_port_handle_t portId,
+                                        bool enabled) override;
+    status_t onInvalidateTrack(audio_io_handle_t output, audio_port_handle_t portId) override;
+    status_t onSetMixerConfig(audio_io_handle_t output,
+                              const audio_config_base_t& config) override;
+            void onCheckSpatializer_l();
+            void doOnCheckSpatializer();
 
             status_t doStopOutput(audio_port_handle_t portId);
             void doReleaseOutput(audio_port_handle_t portId);
@@ -455,7 +479,7 @@ private:
             RECORDING_CONFIGURATION_UPDATE,
             SET_EFFECT_SUSPENDED,
             // PICO OS 5.13.7 command numbers: 15 is the check of the spatializer output
-            // (spatializer backport, not in this tree), 16 is not handled
+            // (spatializer backport), 16 is not handled
             CHECK_SPATIALIZER,
             RESERVED_16,
             SET_PARAMETERS_TO_POLICY,   // PICO
@@ -507,6 +531,7 @@ private:
                                                           bool suspended);
                     // PICO
                     status_t    setParametersToPolicyCommand(const String8& keyValuePairs);
+                    void        checkSpatializerCommand();
                     void        insertCommand_l(AudioCommand *command, int delayMs = 0);
     private:
         class AudioCommandData;
@@ -733,6 +758,12 @@ private:
 
         virtual audio_unique_id_t newAudioUniqueId(audio_unique_id_use_t use);
 
+        // PICO: spatializer requests (SpatializerPolicyCallback) forwarded to audio flinger
+        status_t setSpatializationEnabled(audio_io_handle_t output, audio_port_handle_t portId,
+                                          bool enabled);
+        status_t invalidateTrack(audio_io_handle_t output, audio_port_handle_t portId);
+        status_t setMixerConfig(audio_io_handle_t output, const audio_config_base_t& config);
+
      private:
         AudioPolicyService *mAudioPolicyService;
     };
@@ -829,11 +860,13 @@ private:
                 AudioPlaybackClient(const audio_attributes_t attributes,
                       const audio_io_handle_t io, uid_t uid, pid_t pid,
                             const audio_session_t session, audio_port_handle_t deviceId,
-                            audio_stream_type_t stream) :
-                    AudioClient(attributes, io, uid, pid, session, deviceId), stream(stream) {}
+                            audio_stream_type_t stream, bool isSpatialized) :
+                    AudioClient(attributes, io, uid, pid, session, deviceId), stream(stream),
+                    isSpatialized(isSpatialized) {}
                 ~AudioPlaybackClient() override = default;
 
         const audio_stream_type_t stream;
+        const bool isSpatialized;            // PICO: on the spatializer output
     };
 
     void getPlaybackClientAndEffects(audio_port_handle_t portId,
@@ -889,6 +922,9 @@ private:
     DefaultKeyedVector< audio_port_handle_t, sp<AudioPlaybackClient> >   mAudioPlaybackClients;
 
     MediaPackageManager mPackageManager; // To check allowPlaybackCapture
+
+    // PICO: Manage the spatializer (Spatializer::create() in onFirstRef())
+    sp<Spatializer> mSpatializer;
 };
 
 } // namespace android

@@ -18,10 +18,12 @@
 //#define LOG_NDEBUG 0
 
 #include "AudioPolicyService.h"
+#include "Spatializer.h"
 #include "TypeConverter.h"
 #include <cutils/properties.h>
 #include <media/MediaAnalyticsItem.h>
 #include <media/AudioPolicy.h>
+#include <media/PicoAudioDefs.h>
 #include <utils/Log.h>
 
 namespace android {
@@ -49,8 +51,12 @@ status_t AudioPolicyService::setDeviceConnectionState(audio_devices_t device,
     ALOGV("setDeviceConnectionState()");
     Mutex::Autolock _l(mLock);
     AutoCallerClear acc;
-    return mAudioPolicyManager->setDeviceConnectionState(device, state,
+    status_t status = mAudioPolicyManager->setDeviceConnectionState(device, state,
                                                          device_address, device_name, encodedFormat);
+    if (status == NO_ERROR) {
+        onCheckSpatializer_l();     // PICO
+    }
+    return status;
 }
 
 audio_policy_dev_state_t AudioPolicyService::getDeviceConnectionState(
@@ -80,8 +86,12 @@ status_t AudioPolicyService::handleDeviceConfigChange(audio_devices_t device,
     ALOGV("handleDeviceConfigChange()");
     Mutex::Autolock _l(mLock);
     AutoCallerClear acc;
-    return mAudioPolicyManager->handleDeviceConfigChange(device, device_address,
-                                                         device_name, encodedFormat);
+    status_t status =  mAudioPolicyManager->handleDeviceConfigChange(
+            device, device_address, device_name, encodedFormat);
+    if (status == NO_ERROR) {
+        onCheckSpatializer_l();     // PICO
+    }
+    return status;
 }
 
 status_t AudioPolicyService::setPhoneState(audio_mode_t state)
@@ -138,6 +148,7 @@ status_t AudioPolicyService::setForceUse(audio_policy_force_use_t usage,
     Mutex::Autolock _l(mLock);
     AutoCallerClear acc;
     mAudioPolicyManager->setForceUse(usage, config);
+    onCheckSpatializer_l();     // PICO
     return NO_ERROR;
 }
 
@@ -177,10 +188,26 @@ status_t AudioPolicyService::getOutputForAttr(audio_attributes_t *attr,
                                               audio_output_flags_t flags,
                                               audio_port_handle_t *selectedDeviceId,
                                               audio_port_handle_t *portId,
+                                              bool *isSpatialized,
                                               std::vector<audio_io_handle_t> *secondaryOutputs)
 {
     if (mAudioPolicyManager == NULL) {
         return NO_INIT;
+    }
+    // PICO: the per-player spatialization state set with ISpatializer::enableSpatialization()
+    // forces or prevents the spatialization of the track
+    if (mSpatializer != nullptr) {
+        const std::optional<bool> spatializationEnabled =
+                mSpatializer->getDynamicSpatializationState(pid, session);
+        if (spatializationEnabled.has_value()) {
+            ALOGD("pid %d session %d dynamic spatialization state %d",
+                  pid, session, *spatializationEnabled);
+            if (*spatializationEnabled) {
+                attr->flags |= AUDIO_FLAG_ALWAYS_SPATIALIZE;
+            } else {
+                attr->flags &= ~AUDIO_FLAG_ALWAYS_SPATIALIZE;
+            }
+        }
     }
     ALOGV("getOutputForAttr()");
     Mutex::Autolock _l(mLock);
@@ -203,7 +230,7 @@ status_t AudioPolicyService::getOutputForAttr(audio_attributes_t *attr,
     status_t result = mAudioPolicyManager->getOutputForAttr(attr, output, session, stream, uid,
                                                  config,
                                                  &flags, selectedDeviceId, portId,
-                                                 secondaryOutputs);
+                                                 isSpatialized, secondaryOutputs);
 
     // FIXME: Introduce a way to check for the the telephony device before opening the output
     if ((result == NO_ERROR) &&
@@ -218,13 +245,22 @@ status_t AudioPolicyService::getOutputForAttr(audio_attributes_t *attr,
         secondaryOutputs->clear();
         result = mAudioPolicyManager->getOutputForAttr(attr, output, session, stream, uid, config,
                                                        &flags, selectedDeviceId, portId,
-                                                       secondaryOutputs);
+                                                       isSpatialized, secondaryOutputs);
     }
 
     if (result == NO_ERROR) {
         sp <AudioPlaybackClient> client =
-            new AudioPlaybackClient(*attr, *output, uid, pid, session, *selectedDeviceId, *stream);
+            new AudioPlaybackClient(*attr, *output, uid, pid, session, *selectedDeviceId, *stream,
+                                    *isSpatialized);
         mAudioPlaybackClients.add(*portId, client);
+
+        // PICO: the spatializer tracks the playback clients
+        mLock.unlock();
+        if (mSpatializer != nullptr) {
+            mSpatializer->onSetOutputForAttr(*attr, *config, *output, uid, pid, session, *portId,
+                                             *stream, *isSpatialized);
+        }
+        mLock.lock();
     }
     return result;
 }
@@ -277,6 +313,12 @@ status_t AudioPolicyService::doStartOutput(audio_port_handle_t portId)
     status_t status = mAudioPolicyManager->startOutput(portId);
     if (status == NO_ERROR) {
         client->active = true;
+        // PICO: the spatializer spatializes the client if it plays on the spatializer output
+        mLock.unlock();
+        if (mSpatializer != nullptr) {
+            mSpatializer->onStartOutput(portId);
+        }
+        mLock.lock();
     }
     return status;
 }
@@ -312,6 +354,12 @@ status_t  AudioPolicyService::doStopOutput(audio_port_handle_t portId)
     status_t status = mAudioPolicyManager->stopOutput(portId);
     if (status == NO_ERROR) {
         client->active = false;
+        // PICO
+        mLock.unlock();
+        if (mSpatializer != nullptr) {
+            mSpatializer->onStopOutput(portId);
+        }
+        mLock.lock();
     }
     return status;
 }
@@ -337,6 +385,10 @@ void AudioPolicyService::doReleaseOutput(audio_port_handle_t portId)
         // clean up effects if output was not stopped before being released
         audioPolicyEffects->releaseOutputSessionEffects(
             client->io, client->stream, client->session);
+    }
+    // PICO
+    if (mSpatializer != nullptr) {
+        mSpatializer->onReleaseOutput(portId);
     }
     Mutex::Autolock _l(mLock);
     mAudioPlaybackClients.removeItem(portId);
@@ -1335,6 +1387,45 @@ status_t AudioPolicyService::setRttEnabled(bool enabled)
     Mutex::Autolock _l(mLock);
     mUidPolicy->setRttEnabled(enabled);
     return NO_ERROR;
+}
+
+// PICO: spatial audio backport (Android 13 spatializer)
+
+status_t AudioPolicyService::getSpatializer(
+        const sp<media::INativeSpatializerCallback>& callback,
+        sp<media::ISpatializer>* spatializer)
+{
+    spatializer->clear();
+    if (callback == nullptr) {
+        return BAD_VALUE;
+    }
+    if (mSpatializer != nullptr) {
+        status_t status = mSpatializer->registerCallback(callback);
+        if (status != NO_ERROR) {
+            return status;
+        }
+        *spatializer = mSpatializer;
+    }
+    return NO_ERROR;
+}
+
+status_t AudioPolicyService::canBeSpatialized(const audio_attributes_t *attr,
+                                              const audio_config_t *config,
+                                              const AudioDeviceTypeAddrForSpatialVector &devices,
+                                              bool *canBeSpatialized)
+{
+    if (mAudioPolicyManager == nullptr) {
+        ALOGE("canBeSpatialized not init");
+        return NO_INIT;
+    }
+    Mutex::Autolock _l(mLock);
+    *canBeSpatialized = mAudioPolicyManager->canBeSpatialized(attr, config, devices);
+    return NO_ERROR;
+}
+
+sp<media::ISpatializer> AudioPolicyService::getSpatializer()
+{
+    return mSpatializer;
 }
 
 } // namespace android

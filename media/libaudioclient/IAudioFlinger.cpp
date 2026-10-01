@@ -93,6 +93,12 @@ enum {
     SET_MASTER_BALANCE,
     GET_MASTER_BALANCE,
     SET_EFFECT_SUSPENDED,
+    // PICO OS 5.13.7: code 62 is the Android 11 UPDATE_SECONDARY_OUTPUTS of the factory
+    // (not in this tree), 63..65 the spatial audio backport.
+    RESERVED_UPDATE_SECONDARY_OUTPUTS,
+    INVALIDATE_TRACK,
+    SET_MIXER_CONFIG,
+    SET_SPATIALIZATION_ENABLED,
 };
 
 #define MAX_ITEMS_PER_LIST 1024
@@ -911,6 +917,47 @@ public:
         }
         return reply.readInt64();
     }
+    virtual status_t invalidateTrack(audio_io_handle_t output, audio_port_handle_t portId)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioFlinger::getInterfaceDescriptor());
+        data.writeInt32((int32_t) output);
+        data.writeInt32((int32_t) portId);
+        status_t status = remote()->transact(INVALIDATE_TRACK, data, &reply);
+        if (status != NO_ERROR) {
+            return status;
+        }
+        return reply.readInt32();
+    }
+
+    virtual status_t setMixerConfig(audio_io_handle_t output, const audio_config_base_t& config)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioFlinger::getInterfaceDescriptor());
+        data.writeInt32((int32_t) output);
+        data.write(&config, sizeof(audio_config_base_t));
+        status_t status = remote()->transact(SET_MIXER_CONFIG, data, &reply);
+        if (status != NO_ERROR) {
+            return status;
+        }
+        return reply.readInt32();
+    }
+
+    virtual status_t setSpatializationEnabled(audio_io_handle_t output,
+                                              audio_port_handle_t portId, bool enabled)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioFlinger::getInterfaceDescriptor());
+        data.writeInt32((int32_t) output);
+        data.writeInt32((int32_t) portId);
+        data.writeInt32(enabled ? 1 : 0);
+        status_t status = remote()->transact(SET_SPATIALIZATION_ENABLED, data, &reply);
+        if (status != NO_ERROR) {
+            return status;
+        }
+        return reply.readInt32();
+    }
+
     virtual status_t getMicrophones(std::vector<media::MicrophoneInfo> *microphones)
     {
         Parcel data, reply;
@@ -1573,6 +1620,36 @@ status_t BnAudioFlinger::onTransact(
             reply->writeInt64( frameCountHAL((audio_io_handle_t) data.readInt32()) );
             return NO_ERROR;
         } break;
+        case INVALIDATE_TRACK: {
+            // PICO
+            CHECK_INTERFACE(IAudioFlinger, data, reply);
+            audio_io_handle_t output = (audio_io_handle_t) data.readInt32();
+            audio_port_handle_t portId = (audio_port_handle_t) data.readInt32();
+            reply->writeInt32(invalidateTrack(output, portId));
+            return NO_ERROR;
+        }
+        case SET_MIXER_CONFIG: {
+            // PICO
+            CHECK_INTERFACE(IAudioFlinger, data, reply);
+            audio_io_handle_t output = (audio_io_handle_t) data.readInt32();
+            audio_config_base_t config = {};
+            status_t status = data.read(&config, sizeof(audio_config_base_t));
+            if (status != NO_ERROR) {
+                ALOGE("read config failed %d", status);
+                return status;
+            }
+            reply->writeInt32(setMixerConfig(output, config));
+            return NO_ERROR;
+        }
+        case SET_SPATIALIZATION_ENABLED: {
+            // PICO
+            CHECK_INTERFACE(IAudioFlinger, data, reply);
+            audio_io_handle_t output = (audio_io_handle_t) data.readInt32();
+            audio_port_handle_t portId = (audio_port_handle_t) data.readInt32();
+            bool enabled = data.readInt32() != 0;
+            reply->writeInt32(setSpatializationEnabled(output, portId, enabled));
+            return NO_ERROR;
+        }
         case GET_MICROPHONES: {
             CHECK_INTERFACE(IAudioFlinger, data, reply);
             std::vector<media::MicrophoneInfo> microphones;

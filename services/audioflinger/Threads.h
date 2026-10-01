@@ -30,7 +30,8 @@ public:
         DUPLICATING,        // Thread class is DuplicatingThread
         RECORD,             // Thread class is RecordThread
         OFFLOAD,            // Thread class is OffloadThread
-        MMAP                // control thread for MMAP stream
+        MMAP,               // control thread for MMAP stream
+        SPATIALIZER,        // PICO: Thread class is SpatializerThread
         // If you add any values here, also update ThreadBase::threadTypeToString()
     };
 
@@ -43,6 +44,12 @@ public:
 
     virtual status_t    readyToRun();
 
+    // PICO: spatial audio backport, executed by processConfigEvents_l() on the thread loop
+    // (CFG_EVENT_SET_MIXER_CONFIG and CFG_EVENT_UPDATE_TRACK_SPATIALIZATION).
+    // Only implemented by PlaybackThread and only effective on SPATIALIZER threads.
+    virtual     void        doSetMixerConfig_l(audio_channel_mask_t channelMask __unused) {}
+    virtual     void        doUpdateTrackSpatialization_l(audio_port_handle_t portId __unused) {}
+
     void clearPowerManager();
 
     // base for record and playback
@@ -52,6 +59,9 @@ public:
         CFG_EVENT_SET_PARAMETER,
         CFG_EVENT_CREATE_AUDIO_PATCH,
         CFG_EVENT_RELEASE_AUDIO_PATCH,
+        CFG_EVENT_SET_MIXER_CONFIG,            // PICO: 5, AudioFlinger::setMixerConfig()
+        CFG_EVENT_UPDATE_TRACK_SPATIALIZATION, // PICO: 6, setSpatializationEnabled(), createTrack
+        CFG_EVENT_THREAD_CPUSET,               // PICO: 7, SPATIALIZER thread readyToRun()
     };
 
     class ConfigEventData: public RefBase {
@@ -219,6 +229,74 @@ public:
         virtual ~ReleaseAudioPatchConfigEvent() {}
     };
 
+    // PICO: spatial audio backport config events
+    class SetMixerConfigEventData : public ConfigEventData {
+    public:
+        explicit SetMixerConfigEventData(const audio_config_base_t& config) :
+            mConfig(config) {}
+
+        virtual  void dump(char *buffer, size_t size) {
+            snprintf(buffer, size, "MixerConfig : sampleRate %u, channelMask 0x%x, format 0x%x\n",
+                    mConfig.sample_rate, mConfig.channel_mask, mConfig.format);
+        }
+
+        const audio_config_base_t mConfig;
+    };
+
+    class SetMixerConfigEvent : public ConfigEvent {
+    public:
+        explicit SetMixerConfigEvent(const audio_config_base_t& config) :
+            ConfigEvent(CFG_EVENT_SET_MIXER_CONFIG) {
+            mData = new SetMixerConfigEventData(config);
+        }
+        virtual ~SetMixerConfigEvent() {}
+    };
+
+    class UpdateTrackSpatializationEventData : public ConfigEventData {
+    public:
+        explicit UpdateTrackSpatializationEventData(audio_port_handle_t portId) :
+            mPortId(portId) {}
+
+        virtual  void dump(char *buffer, size_t size) {
+            snprintf(buffer, size, "portId %d\n", mPortId);
+        }
+
+        const audio_port_handle_t mPortId;
+    };
+
+    class UpdateTrackSpatializationConfigEvent : public ConfigEvent {
+    public:
+        explicit UpdateTrackSpatializationConfigEvent(audio_port_handle_t portId) :
+            ConfigEvent(CFG_EVENT_UPDATE_TRACK_SPATIALIZATION) {
+            mData = new UpdateTrackSpatializationEventData(portId);
+        }
+        virtual ~UpdateTrackSpatializationConfigEvent() {}
+    };
+
+    class ThreadCpusetEventData : public ConfigEventData {
+    public:
+        ThreadCpusetEventData(pid_t pid, pid_t tid, int32_t group) :
+            mPid(pid), mTid(tid), mGroup(group) {}
+
+        virtual  void dump(char *buffer, size_t size) {
+            snprintf(buffer, size, "CpusetBost event: pid %d, tid %d, group %d\n",
+                    mPid, mTid, mGroup);
+        }
+
+        const pid_t mPid;
+        const pid_t mTid;
+        const int32_t mGroup;
+    };
+
+    class ThreadCpusetEvent : public ConfigEvent {
+    public:
+        ThreadCpusetEvent(pid_t pid, pid_t tid, int32_t group) :
+            ConfigEvent(CFG_EVENT_THREAD_CPUSET, true) {
+            mData = new ThreadCpusetEventData(pid, tid, group);
+        }
+        virtual ~ThreadCpusetEvent() {}
+    };
+
     class PMDeathRecipient : public IBinder::DeathRecipient {
     public:
         explicit    PMDeathRecipient(const wp<ThreadBase>& thread) : mThread(thread) {}
@@ -278,12 +356,17 @@ public:
                 status_t    sendCreateAudioPatchConfigEvent(const struct audio_patch *patch,
                                                             audio_patch_handle_t *handle);
                 status_t    sendReleaseAudioPatchConfigEvent(audio_patch_handle_t handle);
+                // PICO: posts CFG_EVENT_UPDATE_TRACK_SPATIALIZATION (no wait for completion)
+                void        sendUpdateTrackSpatializationConfigEvent_l(
+                                    audio_port_handle_t portId);
                 void        processConfigEvents_l();
     virtual     void        cacheParameters_l() = 0;
     virtual     status_t    createAudioPatch_l(const struct audio_patch *patch,
                                                audio_patch_handle_t *handle) = 0;
     virtual     status_t    releaseAudioPatch_l(const audio_patch_handle_t handle) = 0;
     virtual     void        toAudioPortConfig(struct audio_port_config *config) = 0;
+                // PICO: channel mask of the mixer (and of the spatializer input) of the thread
+    virtual     audio_channel_mask_t mixerChannelMask() const { return mChannelMask; }
 
 
                 // see note at declaration of mStandby, mOutDevice and mInDevice
@@ -312,8 +395,10 @@ public:
                                             // effect
                     TRACK_SESSION = 0x2,    // the audio session corresponds to at least one
                                             // track
-                    FAST_SESSION = 0x4      // the audio session corresponds to at least one
+                    FAST_SESSION = 0x4,     // the audio session corresponds to at least one
                                             // fast track
+                    SPATIALIZED_SESSION = 0x8 // PICO: the audio session corresponds to at
+                                              // least one track with spatialization enabled
                 };
 
                 // get effect chain corresponding to session Id.
@@ -354,7 +439,12 @@ public:
                 // - EFFECT_SESSION if effects on this audio session exist in one chain
                 // - TRACK_SESSION if tracks on this audio session exist
                 // - FAST_SESSION if fast tracks on this audio session exist
+                // - SPATIALIZED_SESSION if spatialized tracks on this audio session exist
     virtual     uint32_t hasAudioSession_l(audio_session_t sessionId) const = 0;
+                // PICO: true if a valid track of the session has spatialization enabled
+    virtual     bool isSessionSpatialEnabled_l(audio_session_t sessionId __unused) const {
+                    return false;
+                }
                 uint32_t hasAudioSession(audio_session_t sessionId) const {
                     Mutex::Autolock _l(mLock);
                     return hasAudioSession_l(sessionId);
@@ -374,6 +464,10 @@ public:
                             result |= TRACK_SESSION;
                             if (track->isFastTrack()) {
                                 result |= FAST_SESSION;  // caution, only represents first track.
+                            }
+                            // PICO
+                            if (track->isSpatializationEnabled()) {
+                                result |= SPATIALIZED_SESSION; // caution, only first track.
                             }
                             break;
                         }
@@ -718,8 +812,11 @@ public:
     // for initial conditions or large delays.
     static const nsecs_t kMaxNextBufferDelayNs = 100000000;
 
+    // PICO: mixerConfig (spatial audio backport) sets the mixer channel mask when its
+    // channel_mask is not AUDIO_CHANNEL_NONE, otherwise the mixer uses the HAL channel mask.
     PlaybackThread(const sp<AudioFlinger>& audioFlinger, AudioStreamOut* output,
-                   audio_io_handle_t id, audio_devices_t device, type_t type, bool systemReady);
+                   audio_io_handle_t id, audio_devices_t device, type_t type, bool systemReady,
+                   audio_config_base_t *mixerConfig = nullptr);
     virtual             ~PlaybackThread();
 
     // Thread virtuals
@@ -730,6 +827,14 @@ public:
 
     virtual     status_t    checkEffectCompatibility_l(const effect_descriptor_t *desc,
                                                        audio_session_t sessionId);
+
+    // PICO: spatial audio backport
+                void        doSetMixerConfig_l(audio_channel_mask_t channelMask) override;
+                void        doUpdateTrackSpatialization_l(audio_port_handle_t portId) override;
+                bool        isSessionSpatialEnabled_l(audio_session_t sessionId) const override;
+                audio_channel_mask_t mixerChannelMask() const override {
+                                return mMixerChannelMask;
+                            }
 
 protected:
     // Code snippets that were lifted up out of threadLoop()
@@ -766,6 +871,8 @@ protected:
     // ThreadBase virtuals
     virtual     void        preExit();
     virtual     void        onIdleMixer();
+                // PICO: final downmixer management, only implemented by SpatializerThread
+    virtual     void        checkOutputStageEffects() {}
 
     virtual     bool        keepWakeLock() const { return true; }
     virtual     void        acquireWakeLock_l() {
@@ -813,7 +920,8 @@ public:
                                 pid_t tid,
                                 uid_t uid,
                                 status_t *status /*non-NULL*/,
-                                audio_port_handle_t portId);
+                                audio_port_handle_t portId,
+                                bool isSpatialized = false); // PICO: requested by the policy
 
                 AudioStreamOut* getOutput() const;
                 AudioStreamOut* clearOutput();
@@ -960,6 +1068,13 @@ protected:
     // for any processing (including output processing).
     bool                            mEffectBufferValid;
 
+    // PICO: SPATIALIZER thread only. Frame size aligned buffer receiving the output of the
+    // spatializer (OUTPUT_STAGE effect chain) and the mix of the non spatialized tracks, in the
+    // HAL channel mask, copied to the sink buffer.
+    void*                           mPostSpatializerBuffer = nullptr;
+    // Size of mPostSpatializerBuffer in bytes
+    size_t                          mPostSpatializerBufferSize = 0;
+
     // suspend count, > 0 means suspended.  While suspended, the thread continues to pull from
     // tracks and mix, but doesn't write to HAL.  A2DP and SCO HAL implementations can't handle
     // concurrent use of both of them, so Audio Policy Service suspends one of the threads to
@@ -975,6 +1090,11 @@ protected:
     // haptic playback.
     audio_channel_mask_t            mHapticChannelMask = AUDIO_CHANNEL_NONE;
     uint32_t                        mHapticChannelCount = 0;
+
+    // PICO: channel mask of the mixer, of mMixerBuffer and of mEffectBuffer. Same as the HAL
+    // channel mask (mChannelMask) except on a SPATIALIZER thread where it is the spatializer
+    // input channel mask (multichannel, set by AudioFlinger::setMixerConfig()).
+    audio_channel_mask_t            mMixerChannelMask = AUDIO_CHANNEL_NONE;
 private:
     // mMasterMute is in both PlaybackThread and in AudioFlinger.  When a
     // PlaybackThread needs to find out if master-muted, it checks it's local
@@ -1175,7 +1295,8 @@ public:
                 audio_io_handle_t id,
                 audio_devices_t device,
                 bool systemReady,
-                type_t type = MIXER);
+                type_t type = MIXER,
+                audio_config_base_t *mixerConfig = nullptr); // PICO
     virtual             ~MixerThread();
 
     // Thread virtuals
@@ -1267,6 +1388,30 @@ protected:
                                    mFastMixer->setMasterBalance(balance);
                                }
                            }
+};
+
+// PICO: spatial audio backport. Mixer thread of the output opened with
+// AUDIO_OUTPUT_FLAG_SPATIALIZER: the spatialized tracks are mixed in the (multichannel) mixer
+// channel mask into mEffectBuffer, processed by the spatializer effect of the
+// AUDIO_SESSION_OUTPUT_STAGE chain into mPostSpatializerBuffer, where the non spatialized
+// tracks are mixed in the HAL channel mask.
+class SpatializerThread : public MixerThread {
+public:
+    SpatializerThread(const sp<AudioFlinger>& audioFlinger,
+                      AudioStreamOut* output,
+                      audio_io_handle_t id,
+                      audio_devices_t device,
+                      bool systemReady,
+                      audio_config_base_t *mixerConfig);
+    ~SpatializerThread() override;
+
+    bool hasFastMixer() const override { return false; }
+
+protected:
+    void checkOutputStageEffects() override;
+
+private:
+    sp<EffectHandle> mFinalDownMixer;
 };
 
 class DirectOutputThread : public PlaybackThread {

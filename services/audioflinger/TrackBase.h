@@ -97,6 +97,15 @@ public:
     virtual void        invalidate() { mIsInvalid = true; }
             bool        isInvalid() const { return mIsInvalid; }
 
+    // PICO: spatial audio backport, overridden by playback tracks (factory vtable slots 14..17).
+    // Whether the track was requested to be spatialized (output of the spatializer chosen by
+    // the audio policy for content that can be spatialized).
+    virtual bool        isSpatialized() const { return false; }
+    virtual void        setRequestEnableSpatialization(bool enabled __unused) {}
+    // Whether the spatializer thread currently spatializes the track.
+    virtual bool        isSpatializationEnabled() const { return false; }
+    virtual void        setEnabledSpatialization(bool enabled __unused) {}
+
             void        terminate() { mTerminated = true; }
             bool        isTerminated() const { return mTerminated; }
 

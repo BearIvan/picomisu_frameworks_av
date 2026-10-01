@@ -67,6 +67,8 @@ public:
                                       audio_output_flags_t flags,
                                       audio_port_handle_t *selectedDeviceId,
                                       audio_port_handle_t *portId,
+                                      // PICO: true if the output is the spatializer output
+                                      bool *isSpatialized,
                                       std::vector<audio_io_handle_t> *secondaryOutputs) = 0;
     virtual status_t startOutput(audio_port_handle_t portId) = 0;
     virtual status_t stopOutput(audio_port_handle_t portId) = 0;
@@ -252,16 +254,6 @@ public:
                                     Parcel* reply,
                                     uint32_t flags = 0);
 
-    // The audio policy service of this build has no spatializer: onTransact() does not
-    // dispatch the transactions 74..76 (clients get UNKNOWN_TRANSACTION) and in-process
-    // callers get these "not available" results.
-    virtual status_t getSpatializer(const sp<media::INativeSpatializerCallback>& callback,
-                                    sp<media::ISpatializer>* spatializer);
-    virtual status_t canBeSpatialized(const audio_attributes_t *attr,
-                                      const audio_config_t *config,
-                                      const AudioDeviceTypeAddrForSpatialVector &devices,
-                                      bool *canBeSpatialized);
-    virtual sp<media::ISpatializer> getSpatializer();
 private:
     void sanetizeAudioAttributes(audio_attributes_t* attr);
     status_t sanitizeEffectDescriptor(effect_descriptor_t* desc);

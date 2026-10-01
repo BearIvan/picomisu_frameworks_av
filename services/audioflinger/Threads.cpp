@@ -47,7 +47,9 @@
 #include <audio_utils/safe_math.h>
 #include <system/audio_effects/effect_ns.h>
 #include <system/audio_effects/effect_aec.h>
+#include <system/audio_effects/effect_downmix.h>
 #include <system/audio.h>
+#include <media/PicoAudioDefs.h>
 
 // NBAIO implementations
 #include <media/nbaio/AudioStreamInSource.h>
@@ -125,6 +127,31 @@ static const int8_t kMaxTrackRetriesDirect = 2;
 
 // don't warn about blocked writes or record buffer overflows more often than this
 static const nsecs_t kWarningThrottleNs = seconds(5);
+
+// PICO: spatial audio backport
+// cpuset group requested for the SPATIALIZER thread (and its HAL thread) by readyToRun()
+static const int32_t kSpatializerThreadCpusetGroup = 5;
+// AUDIO_FLAG_SPATIALIZE_AMBISONIC (PicoAudioDefs.h): the track content is ambisonic and can only
+// be spatialized by a spatializer configured with an index (ambisonic) mixer channel mask of the
+// same channel count.
+
+// PICO: whether the requested spatialization of a track can be enabled with the mixer channel
+// mask of a SPATIALIZER thread: ambisonic content needs an index mixer channel mask with the
+// channel count of the track, other content a positional mixer channel mask.
+static bool canEnableTrackSpatialization(bool isSpatialized, uint32_t attributesFlags,
+                                         audio_channel_mask_t mixerChannelMask,
+                                         uint32_t mixerChannelCount, uint32_t trackChannelCount)
+{
+    if (!isSpatialized) {
+        return false;
+    }
+    const bool isIndexMixerMask = audio_channel_mask_get_representation(mixerChannelMask)
+            == AUDIO_CHANNEL_REPRESENTATION_INDEX;
+    if ((attributesFlags & AUDIO_FLAG_SPATIALIZE_AMBISONIC) != 0) {
+        return isIndexMixerMask && mixerChannelCount == trackChannelCount;
+    }
+    return !isIndexMixerMask;
+}
 
 // RecordThread loop sleep time upon application overrun or audio HAL read error
 static const int kRecordThreadSleepUs = 5000;
@@ -455,6 +482,8 @@ const char *AudioFlinger::ThreadBase::threadTypeToString(AudioFlinger::ThreadBas
         return "OFFLOAD";
     case MMAP:
         return "MMAP";
+    case SPATIALIZER: // PICO
+        return "SPATIALIZER";
     default:
         return "unknown";
     }
@@ -500,6 +529,19 @@ status_t AudioFlinger::ThreadBase::readyToRun()
     status_t status = initCheck();
     if (status == NO_ERROR) {
         ALOGI("AudioFlinger's thread %p tid=%d ready to run", this, getTid());
+        // PICO: move the spatializer mixer thread to its cpuset group (asynchronously, once
+        // the system is ready) and request the same group for the HAL thread of its stream.
+        if (mType == SPATIALIZER) {
+            const pid_t pid = getpid();
+            const pid_t tid = gettid();
+            {
+                Mutex::Autolock _l(mLock);
+                sp<ConfigEvent> configEvent = (ConfigEvent *)new ThreadCpusetEvent(
+                        pid, tid, kSpatializerThreadCpusetGroup);
+                sendConfigEvent_l(configEvent);
+            }
+            stream()->setHalThreadCpuset(kSpatializerThreadCpusetGroup);
+        }
     } else {
         ALOGE("No working audio driver found.");
     }
@@ -647,6 +689,15 @@ status_t AudioFlinger::ThreadBase::sendReleaseAudioPatchConfigEvent(
     return sendConfigEvent_l(configEvent);
 }
 
+// PICO: sendUpdateTrackSpatializationConfigEvent_l() must be called with ThreadBase::mLock held
+void AudioFlinger::ThreadBase::sendUpdateTrackSpatializationConfigEvent_l(
+        audio_port_handle_t portId)
+{
+    sp<ConfigEvent> configEvent =
+            (ConfigEvent *)new UpdateTrackSpatializationConfigEvent(portId);
+    sendConfigEvent_l(configEvent);
+}
+
 
 // post condition: mConfigEvents.isEmpty()
 void AudioFlinger::ThreadBase::processConfigEvents_l()
@@ -702,6 +753,25 @@ void AudioFlinger::ThreadBase::processConfigEvents_l()
             mLocalLog.log("CFG_EVENT_RELEASE_AUDIO_PATCH: old device %#x (%s) new device %#x (%s)",
                     (unsigned)oldDevice, toString(oldDevice).c_str(),
                     (unsigned)newDevice, toString(newDevice).c_str());
+        } break;
+        // PICO: spatial audio backport
+        case CFG_EVENT_SET_MIXER_CONFIG: {
+            SetMixerConfigEventData *data = (SetMixerConfigEventData *)event->mData.get();
+            doSetMixerConfig_l(data->mConfig.channel_mask);
+        } break;
+        case CFG_EVENT_UPDATE_TRACK_SPATIALIZATION: {
+            UpdateTrackSpatializationEventData *data =
+                    (UpdateTrackSpatializationEventData *)event->mData.get();
+            doUpdateTrackSpatialization_l(data->mPortId);
+        } break;
+        case CFG_EVENT_THREAD_CPUSET: {
+            ThreadCpusetEventData *data = (ThreadCpusetEventData *)event->mData.get();
+            int err = requestThreadCpuset(data->mPid, data->mTid, data->mGroup,
+                    true /*asynchronous*/);
+            if (err != 0) {
+                ALOGW("requestThreadCpuset failed %d for pid %d, tid %d, group %d",
+                      err, data->mPid, data->mTid, data->mGroup);
+            }
         } break;
         default:
             ALOG_ASSERT(false, "processConfigEvents_l() unknown event type %d", event->mType);
@@ -919,6 +989,8 @@ String16 AudioFlinger::ThreadBase::getWakeLockTag()
         return String16("AudioOffload");
     case MMAP:
         return String16("Mmap");
+    case SPATIALIZER: // PICO
+        return String16("AudioSpatial");
     default:
         ALOG_ASSERT(false);
         return String16("AudioUnknown");
@@ -1207,6 +1279,15 @@ status_t AudioFlinger::PlaybackThread::checkEffectCompatibility_l(
         return NO_ERROR;
     }
 
+    // PICO: the spatializer effect can only be created on a spatializer thread
+    const bool isSpatializer =
+            memcmp(&desc->type, FX_IID_SPATIALIZER, sizeof(effect_uuid_t)) == 0;
+    if (isSpatializer && mType != SPATIALIZER) {
+        ALOGW("%s: attempt to create a spatializer effect on a thread of type %d",
+                __func__, mType);
+        return BAD_VALUE;
+    }
+
     switch (mType) {
     case MIXER: {
 #ifndef MULTICHANNEL_EFFECT_CHAIN
@@ -1283,6 +1364,27 @@ status_t AudioFlinger::PlaybackThread::checkEffectCompatibility_l(
         if ((desc->flags & EFFECT_FLAG_HW_ACC_TUNNEL) != 0) {
             ALOGW("checkEffectCompatibility_l(): HW tunneled effect %s on"
                     " DUPLICATING thread %s", desc->name, mThreadName);
+            return BAD_VALUE;
+        }
+        break;
+    case SPATIALIZER: // PICO
+        // Global effects (AUDIO_SESSION_OUTPUT_MIX) are not supported on spatializer mixer
+        // as there is no common accumulation buffer for spatialized and non spatialized tracks.
+        // Post processing effects (AUDIO_SESSION_OUTPUT_STAGE) are supported, the spatializer
+        // and the downmixer as well.
+        if (sessionId == AUDIO_SESSION_OUTPUT_MIX) {
+            ALOGW("%s: global effect %s not supported on spatializer thread %s",
+                    __func__, desc->name, mThreadName);
+            return BAD_VALUE;
+        } else if (sessionId == AUDIO_SESSION_OUTPUT_STAGE) {
+            // only post processing, downmixer or spatializer effects on output stage session
+            if (isSpatializer
+                    || (desc->flags & EFFECT_FLAG_TYPE_MASK) == EFFECT_FLAG_TYPE_POST_PROC
+                    || memcmp(&desc->type, EFFECT_UIID_DOWNMIX, sizeof(effect_uuid_t)) == 0) {
+                break;
+            }
+            ALOGW("%s: non post processing effect %s not allowed on output stage session",
+                    __func__, desc->name);
             return BAD_VALUE;
         }
         break;
@@ -1737,7 +1839,8 @@ AudioFlinger::PlaybackThread::PlaybackThread(const sp<AudioFlinger>& audioFlinge
                                              audio_io_handle_t id,
                                              audio_devices_t device,
                                              type_t type,
-                                             bool systemReady)
+                                             bool systemReady,
+                                             audio_config_base_t *mixerConfig)
     :   ThreadBase(audioFlinger, id, device, AUDIO_DEVICE_NONE, type, systemReady),
         mNormalFrameCount(0), mSinkBuffer(NULL),
         mMixerBufferEnabled(AudioFlinger::kEnableExtendedPrecision),
@@ -1755,7 +1858,7 @@ AudioFlinger::PlaybackThread::PlaybackThread(const sp<AudioFlinger>& audioFlinge
         mSuspendedFrames(0),
         mActiveTracks(&this->mLocalLog),
         // mStreamTypes[] initialized in constructor body
-        mTracks(type == MIXER),
+        mTracks(type == MIXER || type == SPATIALIZER), // PICO: SPATIALIZER
         mOutput(output),
         mNumWrites(0), mNumDelayedWrites(0), mInWrite(false),
         mMixerStatus(MIXER_IDLE),
@@ -1796,7 +1899,19 @@ AudioFlinger::PlaybackThread::PlaybackThread(const sp<AudioFlinger>& audioFlinge
                 mOutput->audioHwDev->moduleName(), AUDIO_HARDWARE_MODULE_ID_MSD) == 0;
     }
 
+    // PICO: spatial audio backport, mixer channel mask requested by the creator
+    if (mixerConfig != nullptr && mixerConfig->channel_mask != AUDIO_CHANNEL_NONE) {
+        mMixerChannelMask = mixerConfig->channel_mask;
+    }
+
     readOutputParameters_l();
+
+    // PICO: only a SPATIALIZER thread mixes in a channel mask different from the HAL one
+    if (mType != SPATIALIZER
+            && mMixerChannelMask != mChannelMask) {
+        LOG_ALWAYS_FATAL("HAL channel mask %#x does not match mixer channel mask %#x",
+                mChannelMask, mMixerChannelMask);
+    }
 
     // TODO: We may also match on address as well as device type for
     // AUDIO_DEVICE_OUT_BUS, AUDIO_DEVICE_OUT_ALL_A2DP, AUDIO_DEVICE_OUT_REMOTE_SUBMIX
@@ -1824,6 +1939,7 @@ AudioFlinger::PlaybackThread::~PlaybackThread()
     free(mSinkBuffer);
     free(mMixerBuffer);
     free(mEffectBuffer);
+    free(mPostSpatializerBuffer); // PICO
 }
 
 // Thread virtuals
@@ -1911,6 +2027,11 @@ void AudioFlinger::PlaybackThread::dumpTracks_l(int fd, const Vector<String16>& 
 void AudioFlinger::PlaybackThread::dumpInternals_l(int fd, const Vector<String16>& args __unused)
 {
     dprintf(fd, "  Master mute: %s\n", mMasterMute ? "on" : "off");
+    // PICO: mixer channel mask, buffer sizes and the post spatializer buffer
+    dprintf(fd, "  Mixer channel Mask: %#x (%s)\n", mMixerChannelMask,
+            channelMaskToString(mMixerChannelMask, true /* output */).c_str());
+    dprintf(fd, "  Haptic channel Mask: %#x (%s)\n", mHapticChannelMask,
+            channelMaskToString(mHapticChannelMask, true /* output */).c_str());
     if (mHapticChannelMask != AUDIO_CHANNEL_NONE) {
         dprintf(fd, "  Haptic channel mask: %#x (%s)\n", mHapticChannelMask,
                 channelMaskToString(mHapticChannelMask, true /* output */).c_str());
@@ -1920,9 +2041,11 @@ void AudioFlinger::PlaybackThread::dumpInternals_l(int fd, const Vector<String16
     dprintf(fd, "  Delayed writes: %d\n", mNumDelayedWrites);
     dprintf(fd, "  Blocked in write: %s\n", mInWrite ? "yes" : "no");
     dprintf(fd, "  Suspend count: %d\n", mSuspended);
-    dprintf(fd, "  Sink buffer : %p\n", mSinkBuffer);
-    dprintf(fd, "  Mixer buffer: %p\n", mMixerBuffer);
-    dprintf(fd, "  Effect buffer: %p\n", mEffectBuffer);
+    dprintf(fd, "  Sink buffer : %p size %zu\n", mSinkBuffer, mSinkBufferSize);
+    dprintf(fd, "  Mixer buffer: %p size %zu\n", mMixerBuffer, mMixerBufferSize);
+    dprintf(fd, "  Effect buffer: %p size %zu\n", mEffectBuffer, mEffectBufferSize);
+    dprintf(fd, "  PostSpatial buffer: %p size %zu\n", mPostSpatializerBuffer,
+            mPostSpatializerBufferSize);
     dprintf(fd, "  Fast track availMask=%#x\n", mFastTrackAvailMask);
     dprintf(fd, "  Standby delay ns=%lld\n", (long long)mStandbyDelayNs);
     AudioStreamOut *output = mOutput;
@@ -1959,7 +2082,8 @@ sp<AudioFlinger::PlaybackThread::Track> AudioFlinger::PlaybackThread::createTrac
         pid_t tid,
         uid_t uid,
         status_t *status,
-        audio_port_handle_t portId)
+        audio_port_handle_t portId,
+        bool isSpatialized)
 {
     size_t frameCount = *pFrameCount;
     size_t notificationFrameCount = *pNotificationFrameCount;
@@ -2236,10 +2360,12 @@ sp<AudioFlinger::PlaybackThread::Track> AudioFlinger::PlaybackThread::createTrac
             }
         }
 
+        // PICO: isSpatialized: spatialization requested by the audio policy
         track = new Track(this, client, streamType, attr, sampleRate, format,
                           channelMask, frameCount,
                           nullptr /* buffer */, (size_t)0 /* bufferSize */, sharedBuffer,
-                          sessionId, creatorPid, uid, *flags, TrackBase::TYPE_DEFAULT, portId);
+                          sessionId, creatorPid, uid, *flags, TrackBase::TYPE_DEFAULT, portId,
+                          SIZE_MAX /*frameCountToBeReady*/, isSpatialized);
 
         lStatus = track != 0 ? track->initCheck() : (status_t) NO_MEMORY;
         if (lStatus != NO_ERROR) {
@@ -2255,6 +2381,17 @@ sp<AudioFlinger::PlaybackThread::Track> AudioFlinger::PlaybackThread::createTrac
             track->setMainBuffer(chain->inBuffer());
             chain->setStrategy(AudioSystem::getStrategyForStream(track->streamType()));
             chain->incTrackCnt();
+        }
+
+        // PICO: on a spatializer thread, a new track of a spatialized session is spatialized
+        // as the other tracks of the session, otherwise the spatialization requested by the
+        // policy is evaluated on the thread loop.
+        if (mType == SPATIALIZER) {
+            if (isSessionSpatialEnabled_l(sessionId)) {
+                track->setEnabledSpatialization(true);
+            } else if (isSpatialized) {
+                sendUpdateTrackSpatializationConfigEvent_l(portId);
+            }
         }
 
         if ((*flags & AUDIO_OUTPUT_FLAG_FAST) && (tid != -1)) {
@@ -2588,6 +2725,13 @@ void AudioFlinger::PlaybackThread::readOutputParameters_l()
         LOG_ALWAYS_FATAL("HAL channel mask %#x not supported for mixed output",
                 mChannelMask);
     }
+
+    // PICO: the mixer uses the HAL channel mask unless another one was configured
+    if (mMixerChannelMask == AUDIO_CHANNEL_NONE) {
+        mMixerChannelMask = mChannelMask;
+    }
+    const uint32_t mixerChannelCount = audio_channel_count_from_out_mask(mMixerChannelMask);
+
     mChannelCount = audio_channel_count_from_out_mask(mChannelMask);
     mBalance.setChannelMask(mChannelMask);
 
@@ -2710,7 +2854,8 @@ void AudioFlinger::PlaybackThread::readOutputParameters_l()
     mMixerBuffer = NULL;
     if (mMixerBufferEnabled) {
         mMixerBufferFormat = AUDIO_FORMAT_PCM_FLOAT; // no longer valid: AUDIO_FORMAT_PCM_16_BIT.
-        mMixerBufferSize = mNormalFrameCount * mChannelCount
+        // PICO: the mixer buffer is in the mixer channel mask
+        mMixerBufferSize = mNormalFrameCount * mixerChannelCount
                 * audio_bytes_per_sample(mMixerBufferFormat);
         (void)posix_memalign(&mMixerBuffer, 32, mMixerBufferSize);
     }
@@ -2718,15 +2863,26 @@ void AudioFlinger::PlaybackThread::readOutputParameters_l()
     mEffectBuffer = NULL;
     if (mEffectBufferEnabled) {
         mEffectBufferFormat = EFFECT_BUFFER_FORMAT;
-        mEffectBufferSize = mNormalFrameCount * mChannelCount
+        // PICO: the effect buffer is in the mixer channel mask
+        mEffectBufferSize = mNormalFrameCount * mixerChannelCount
                 * audio_bytes_per_sample(mEffectBufferFormat);
         (void)posix_memalign(&mEffectBuffer, 32, mEffectBufferSize);
+    }
+
+    // PICO: the spatializer output and the non spatialized tracks are in the HAL channel mask
+    if (mType == SPATIALIZER) {
+        free(mPostSpatializerBuffer);
+        mPostSpatializerBuffer = nullptr;
+        mPostSpatializerBufferSize = mNormalFrameCount * mChannelCount
+                * audio_bytes_per_sample(mEffectBufferFormat);
+        (void)posix_memalign(&mPostSpatializerBuffer, 32, mPostSpatializerBufferSize);
     }
 
     mHapticChannelMask = mChannelMask & AUDIO_CHANNEL_HAPTIC_ALL;
     mChannelMask &= ~mHapticChannelMask;
     mHapticChannelCount = audio_channel_count_from_out_mask(mHapticChannelMask);
     mChannelCount -= mHapticChannelCount;
+    mMixerChannelMask &= ~mHapticChannelMask; // PICO
 
     // force reconfiguration of effect chains and engines to take new buffer size and audio
     // parameters into account
@@ -3090,18 +3246,58 @@ status_t AudioFlinger::PlaybackThread::addEffectChain_l(const sp<EffectChain>& c
 {
     audio_session_t session = chain->sessionId();
     sp<EffectBufferHalInterface> halInBuffer, halOutBuffer;
-    status_t result = mAudioFlinger->mEffectsFactoryHal->mirrorBuffer(
-            mEffectBufferEnabled ? mEffectBuffer : mSinkBuffer,
-            mEffectBufferEnabled ? mEffectBufferSize : mSinkBufferSize,
-            &halInBuffer);
-    if (result != OK) return result;
-    halOutBuffer = halInBuffer;
-    effect_buffer_t *buffer = reinterpret_cast<effect_buffer_t*>(halInBuffer->externalData());
-    ALOGV("addEffectChain_l() %p on thread %p for session %d", chain.get(), this, session);
-    if (session > AUDIO_SESSION_OUTPUT_MIX) {
+    effect_buffer_t *buffer = nullptr; // only used for non global sessions
+
+    if (mType == SPATIALIZER) { // PICO
+        if (session > AUDIO_SESSION_OUTPUT_MIX) {
+            // player sessions on a spatializer output use a dedicated input buffer and
+            // output multichannel to mEffectBuffer if the session is spatialized
+            // or in the HAL channel mask to mPostSpatializerBuffer if not spatialized.
+            const bool isSessionSpatialized = isSessionSpatialEnabled_l(session);
+            const audio_channel_mask_t channelMask =
+                    isSessionSpatialized ? mMixerChannelMask : mChannelMask;
+            size_t numSamples = mNormalFrameCount
+                    * (audio_channel_count_from_out_mask(channelMask) + mHapticChannelCount);
+            status_t result = mAudioFlinger->mEffectsFactoryHal->allocateBuffer(
+                    numSamples * sizeof(effect_buffer_t),
+                    &halInBuffer);
+            if (result != OK) return result;
+
+            result = mAudioFlinger->mEffectsFactoryHal->mirrorBuffer(
+                    isSessionSpatialized ? mEffectBuffer : mPostSpatializerBuffer,
+                    isSessionSpatialized ? mEffectBufferSize : mPostSpatializerBufferSize,
+                    &halOutBuffer);
+            if (result != OK) return result;
+
+#ifdef FLOAT_EFFECT_CHAIN
+            buffer = halInBuffer->audioBuffer()->f32;
+#else
+            buffer = halInBuffer->audioBuffer()->s16;
+#endif
+            ALOGV("addEffectChain_l() creating new input buffer %p session %d",
+                    buffer, session);
+        } else {
+            // A global session on a SPATIALIZER thread is OUTPUT_STAGE: it uses mEffectBuffer
+            // as input buffer and mPostSpatializerBuffer as output buffer.
+            status_t result = mAudioFlinger->mEffectsFactoryHal->mirrorBuffer(
+                    mEffectBuffer, mEffectBufferSize, &halInBuffer);
+            if (result != OK) return result;
+            result = mAudioFlinger->mEffectsFactoryHal->mirrorBuffer(
+                    mPostSpatializerBuffer, mPostSpatializerBufferSize, &halOutBuffer);
+            if (result != OK) return result;
+        }
+    } else {
+        status_t result = mAudioFlinger->mEffectsFactoryHal->mirrorBuffer(
+                mEffectBufferEnabled ? mEffectBuffer : mSinkBuffer,
+                mEffectBufferEnabled ? mEffectBufferSize : mSinkBufferSize,
+                &halInBuffer);
+        if (result != OK) return result;
+        halOutBuffer = halInBuffer;
+        buffer = reinterpret_cast<effect_buffer_t*>(halInBuffer->externalData());
+        ALOGV("addEffectChain_l() %p on thread %p for session %d", chain.get(), this, session);
         // Only one effect chain can be present in direct output thread and it uses
         // the sink buffer as input
-        if (mType != DIRECT) {
+        if (session > AUDIO_SESSION_OUTPUT_MIX && mType != DIRECT) {
             size_t numSamples = mNormalFrameCount * (mChannelCount + mHapticChannelCount);
             status_t result = mAudioFlinger->mEffectsFactoryHal->allocateBuffer(
                     numSamples * sizeof(effect_buffer_t),
@@ -3115,7 +3311,9 @@ status_t AudioFlinger::PlaybackThread::addEffectChain_l(const sp<EffectChain>& c
             ALOGV("addEffectChain_l() creating new input buffer %p session %d",
                     buffer, session);
         }
+    }
 
+    if (session > AUDIO_SESSION_OUTPUT_MIX) {
         // Attach all tracks with same session ID to this chain.
         for (size_t i = 0; i < mTracks.size(); ++i) {
             sp<Track> track = mTracks[i];
@@ -3196,6 +3394,263 @@ size_t AudioFlinger::PlaybackThread::removeEffectChain_l(const sp<EffectChain>& 
     return mEffectChains.size();
 }
 
+// PICO: spatial audio backport
+
+// isSessionSpatialEnabled_l() must be called with ThreadBase::mLock held
+bool AudioFlinger::PlaybackThread::isSessionSpatialEnabled_l(audio_session_t sessionId) const
+{
+    for (size_t i = 0; i < mTracks.size(); i++) {
+        sp<Track> track = mTracks[i];
+        if (track->sessionId() == sessionId
+                && !track->isInvalid()
+                && !track->isTerminated()
+                && track->isSpatializationEnabled()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// doSetMixerConfig_l() must be called with ThreadBase::mLock held, on the thread loop
+// (CFG_EVENT_SET_MIXER_CONFIG posted by AudioFlinger::setMixerConfig())
+void AudioFlinger::PlaybackThread::doSetMixerConfig_l(audio_channel_mask_t channelMask)
+{
+    if (mType != SPATIALIZER) {
+        ALOGW("%s not spatializer thread", __func__);
+        return;
+    }
+    if (mMixerChannelMask == channelMask) {
+        ALOGD("%s mixer channel mask not changed", __func__);
+        return;
+    }
+    mMixerChannelMask = channelMask;
+    const uint32_t mixerChannelCount = audio_channel_count_from_out_mask(channelMask);
+
+    // Enable or disable the requested spatialization of each track according to the new
+    // mixer channel mask and collect the sessions whose tracks changed.
+    std::set<audio_session_t> changedSessions;
+    for (const sp<Track>& track : mTracks) {
+        if (canEnableTrackSpatialization(track->isSpatialized(), track->attributes().flags,
+                channelMask, mixerChannelCount, track->channelCount())) {
+            if (!track->isSpatializationEnabled()) {
+                track->setEnabledSpatialization(true);
+                changedSessions.insert(track->sessionId());
+            }
+        } else if (track->isSpatializationEnabled()) {
+            track->setEnabledSpatialization(false);
+            changedSessions.insert(track->sessionId());
+        }
+    }
+    // All the tracks of a spatialized session are spatialized
+    for (const sp<Track>& track : mTracks) {
+        if (!track->isSpatializationEnabled() && isSessionSpatialEnabled_l(track->sessionId())) {
+            track->setEnabledSpatialization(true);
+        }
+    }
+
+    // Resize the mixer and effect buffers, which are in the mixer channel mask
+    if (mMixerBufferEnabled) {
+        const size_t mixerBufferSize = mNormalFrameCount * mixerChannelCount
+                * audio_bytes_per_sample(mMixerBufferFormat);
+        if (mixerBufferSize != mMixerBufferSize || mMixerBuffer == nullptr) {
+            if (mMixerBuffer != nullptr) {
+                free(mMixerBuffer);
+                mMixerBuffer = nullptr;
+            }
+            mMixerBufferFormat = AUDIO_FORMAT_PCM_FLOAT;
+            mMixerBufferSize = mixerBufferSize;
+            (void)posix_memalign(&mMixerBuffer, 32, mMixerBufferSize);
+        }
+    }
+    bool effectBufferChanged = false;
+    if (mEffectBufferEnabled) {
+        const size_t effectBufferSize = mNormalFrameCount * mixerChannelCount
+                * audio_bytes_per_sample(mEffectBufferFormat);
+        if (effectBufferSize != mEffectBufferSize || mEffectBuffer == nullptr) {
+            if (mEffectBuffer != nullptr) {
+                free(mEffectBuffer);
+                mEffectBuffer = nullptr;
+            }
+            mEffectBufferFormat = EFFECT_BUFFER_FORMAT;
+            mEffectBufferSize = effectBufferSize;
+            (void)posix_memalign(&mEffectBuffer, 32, mEffectBufferSize);
+            effectBufferChanged = true;
+        }
+    }
+
+    // Update the buffers of the effect chains:
+    // - player sessions whose spatialization changed (or spatialized sessions if mEffectBuffer
+    //   changed) get a new input buffer and output to mEffectBuffer if spatialized or to
+    //   mPostSpatializerBuffer if not,
+    // - the OUTPUT_STAGE session reads mEffectBuffer,
+    // - the effects of the other chains are reconfigured for the new channel masks.
+    for (size_t i = 0; i < mEffectChains.size(); i++) {
+        sp<EffectChain> chain = mEffectChains[i];
+        const audio_session_t sessionId = chain->sessionId();
+        sp<EffectBufferHalInterface> halInBuffer, halOutBuffer;
+        bool outBufferChanged = false;
+        if (sessionId > AUDIO_SESSION_OUTPUT_MIX) {
+            const bool changed = changedSessions.count(sessionId) != 0;
+            ALOGD("sessionId %d spatialization state changed %d", sessionId, changed);
+            const bool isSessionSpatialized = isSessionSpatialEnabled_l(sessionId);
+            ALOGD("isSessionSpatialized %d", isSessionSpatialized);
+            if (!changed && !(effectBufferChanged && isSessionSpatialized)) {
+                chain->reconfigureSpatializerEffects();
+                continue;
+            }
+            const uint32_t channelCount = audio_channel_count_from_out_mask(
+                    isSessionSpatialized ? mMixerChannelMask : mChannelMask);
+            const size_t numSamples = mNormalFrameCount * (channelCount + mHapticChannelCount);
+            status_t status = mAudioFlinger->mEffectsFactoryHal->allocateBuffer(
+                    numSamples * sizeof(effect_buffer_t), &halInBuffer);
+            if (status != OK) {
+                return;
+            }
+            status = mAudioFlinger->mEffectsFactoryHal->mirrorBuffer(
+                    isSessionSpatialized ? mEffectBuffer : mPostSpatializerBuffer,
+                    isSessionSpatialized ? mEffectBufferSize : mPostSpatializerBufferSize,
+                    &halOutBuffer);
+            if (status != OK) {
+                return;
+            }
+            outBufferChanged = true;
+        } else if (effectBufferChanged && sessionId == AUDIO_SESSION_OUTPUT_STAGE) {
+            status_t status = mAudioFlinger->mEffectsFactoryHal->mirrorBuffer(
+                    mEffectBuffer, mEffectBufferSize, &halInBuffer);
+            if (status != OK) {
+                return;
+            }
+        } else {
+            chain->reconfigureSpatializerEffects();
+            continue;
+        }
+        ALOGD("%s session %d, in %p -> %p", __func__, sessionId,
+                halInBuffer->audioBuffer(), halInBuffer->ptr());
+        chain->setInBuffer(halInBuffer);
+        if (outBufferChanged) {
+            ALOGD("%s session %d, out %p -> %p", __func__, sessionId,
+                    halOutBuffer->audioBuffer(), halOutBuffer->ptr());
+            chain->setOutBuffer(halOutBuffer);
+        }
+        chain->updateBuffers_l();
+    }
+
+    // Reattach the tracks to the (new) input buffer of their chain or to the mixer
+    for (size_t i = 0; i < mTracks.size(); i++) {
+        sp<Track> track = mTracks[i];
+        sp<EffectChain> chain = getEffectChain_l(track->sessionId());
+        if (chain != 0) {
+            track->setMainBuffer(chain->inBuffer());
+        } else {
+            track->setMainBuffer(reinterpret_cast<effect_buffer_t*>(mSinkBuffer));
+        }
+    }
+}
+
+// doUpdateTrackSpatialization_l() must be called with ThreadBase::mLock held, on the thread
+// loop (CFG_EVENT_UPDATE_TRACK_SPATIALIZATION posted by AudioFlinger::setSpatializationEnabled()
+// and createTrack_l())
+void AudioFlinger::PlaybackThread::doUpdateTrackSpatialization_l(audio_port_handle_t portId)
+{
+    ALOGD("updateTrackSpatialization portId %d", portId);
+    if (mType != SPATIALIZER) {
+        return;
+    }
+    sp<Track> track;
+    for (const sp<Track>& t : mTracks) {
+        if (t->portId() == portId) {
+            track = t;
+            break;
+        }
+    }
+    if (track == 0) {
+        return;
+    }
+
+    const bool wasSessionSpatialized = isSessionSpatialEnabled_l(track->sessionId());
+    const bool isSpatialized = track->isSpatialized();
+    if (canEnableTrackSpatialization(isSpatialized, track->attributes().flags,
+            mMixerChannelMask, audio_channel_count_from_out_mask(mMixerChannelMask),
+            track->channelCount())) {
+        ALOGD("track isSpatialized %d set true session %d isInvalid %d, terminated %d",
+                track->isSpatialized(), track->sessionId(), track->isInvalid(),
+                track->isTerminated());
+        if (!track->isSpatializationEnabled()) {
+            track->setEnabledSpatialization(true);
+        }
+    } else if (track->isSpatializationEnabled()) {
+        track->setEnabledSpatialization(false);
+    }
+
+    const bool isSessionSpatialized = isSessionSpatialEnabled_l(track->sessionId());
+    const bool changed = wasSessionSpatialized != isSessionSpatialized;
+    ALOGD("sessionSpatial %d -> %d", wasSessionSpatialized, isSessionSpatialized);
+    if (isSessionSpatialized) {
+        if (!changed) {
+            // the session stays spatialized: all its tracks are spatialized
+            if (!track->isSpatializationEnabled()) {
+                track->setEnabledSpatialization(true);
+            }
+            return;
+        }
+        for (const sp<Track>& t : mTracks) {
+            if (t->sessionId() == track->sessionId()) {
+                t->setEnabledSpatialization(true);
+            }
+        }
+    } else if (!changed) {
+        return;
+    }
+    ALOGD("sessionId %d spatialization state changed %d", track->sessionId(), changed);
+
+    // The spatialization of the session changed: its effect chain must output to mEffectBuffer
+    // (multichannel) if spatialized or to mPostSpatializerBuffer otherwise.
+    sp<EffectChain> chain = getEffectChain_l(track->sessionId());
+    if (chain == 0) {
+        return;
+    }
+    const uint32_t channelCount = audio_channel_count_from_out_mask(
+            isSessionSpatialized ? mMixerChannelMask : mChannelMask);
+    const size_t numSamples = mNormalFrameCount * (channelCount + mHapticChannelCount);
+    sp<EffectBufferHalInterface> halInBuffer, halOutBuffer;
+    bool inBufferChanged = false;
+    sp<EffectBufferHalInterface> chainInBuffer = chain->inBufferHal();
+    if (chainInBuffer == 0 || chainInBuffer->getSize() != numSamples * sizeof(effect_buffer_t)) {
+        status_t status = mAudioFlinger->mEffectsFactoryHal->allocateBuffer(
+                numSamples * sizeof(effect_buffer_t), &halInBuffer);
+        if (status != OK) {
+            ALOGE("allocateBuffer in buffer failed %d", status);
+            return;
+        }
+        chain->setInBuffer(halInBuffer);
+        inBufferChanged = true;
+    }
+    void *outBuffer = isSessionSpatialized ? mEffectBuffer : mPostSpatializerBuffer;
+    sp<EffectBufferHalInterface> chainOutBuffer = chain->outBufferHal();
+    if (chainOutBuffer == 0 || chainOutBuffer->ptr() != outBuffer) {
+        status_t status = mAudioFlinger->mEffectsFactoryHal->mirrorBuffer(outBuffer,
+                isSessionSpatialized ? mEffectBufferSize : mPostSpatializerBufferSize,
+                &halOutBuffer);
+        if (status != OK) {
+            ALOGE("mirrorBuffer out buffer failed %d, isSpatialized %d",
+                    status, isSessionSpatialized);
+            return;
+        }
+        chain->setOutBuffer(halOutBuffer);
+    } else if (!inBufferChanged) {
+        return;
+    }
+    chain->updateBuffers_l();
+
+    // Attach the tracks of the session to the (new) input buffer of the chain
+    for (size_t i = 0; i < mTracks.size(); i++) {
+        sp<Track> t = mTracks[i];
+        if (t->sessionId() == chain->sessionId()) {
+            t->setMainBuffer(chain->inBuffer());
+        }
+    }
+}
+
 status_t AudioFlinger::PlaybackThread::attachAuxEffect(
         const sp<AudioFlinger::PlaybackThread::Track>& track, int EffectId)
 {
@@ -3256,7 +3711,7 @@ bool AudioFlinger::PlaybackThread::threadLoop()
     cacheParameters_l();
     mSleepTimeUs = mIdleSleepTimeUs;
 
-    if (mType == MIXER) {
+    if (mType == MIXER || mType == SPATIALIZER) { // PICO: SPATIALIZER
         sleepTimeShift = 0;
     }
 
@@ -3301,6 +3756,7 @@ bool AudioFlinger::PlaybackThread::threadLoop()
 
         Vector< sp<EffectChain> > effectChains;
         audio_session_t activeHapticSessionId = AUDIO_SESSION_NONE;
+        bool isHapticSessionSpatialized = false; // PICO
         std::vector<sp<Track>> activeTracks;
 
         // If the device is AUDIO_DEVICE_OUT_BUS, check for downstream latency.
@@ -3557,7 +4013,7 @@ bool AudioFlinger::PlaybackThread::threadLoop()
 
                     mStandbyTimeNs = systemTime() + mStandbyDelayNs;
                     mSleepTimeUs = mIdleSleepTimeUs;
-                    if (mType == MIXER) {
+                    if (mType == MIXER || mType == SPATIALIZER) { // PICO: SPATIALIZER
                         sleepTimeShift = 0;
                     }
 
@@ -3586,6 +4042,9 @@ bool AudioFlinger::PlaybackThread::threadLoop()
                 for (const auto& track : mActiveTracks) {
                     if (track->getHapticPlaybackEnabled()) {
                         activeHapticSessionId = track->sessionId();
+                        // PICO
+                        isHapticSessionSpatialized =
+                                mType == SPATIALIZER && track->isSpatializationEnabled();
                         break;
                     }
                 }
@@ -3630,6 +4089,9 @@ bool AudioFlinger::PlaybackThread::threadLoop()
             //
             // mMixerBufferValid is only set true by MixerThread::prepareTracks_l().
             // TODO use mSleepTimeUs == 0 as an additional condition.
+            // PICO: mMixerBuffer and mEffectBuffer are in the mixer channel mask
+            const uint32_t mixerChannelCount = mEffectBufferValid ?
+                    audio_channel_count_from_out_mask(mMixerChannelMask) : mChannelCount;
             if (mMixerBufferValid) {
                 void *buffer = mEffectBufferValid ? mEffectBuffer : mSinkBuffer;
                 audio_format_t format = mEffectBufferValid ? mEffectBufferFormat : mFormat;
@@ -3650,7 +4112,7 @@ bool AudioFlinger::PlaybackThread::threadLoop()
                 }
 
                 memcpy_by_audio_format(buffer, format, mMixerBuffer, mMixerBufferFormat,
-                        mNormalFrameCount * (mChannelCount + mHapticChannelCount));
+                        mNormalFrameCount * (mixerChannelCount + mHapticChannelCount));
 
                 // If we're going directly to the sink and there are haptic channels,
                 // we should adjust channels as the sample data is partially interleaved
@@ -3683,8 +4145,13 @@ bool AudioFlinger::PlaybackThread::threadLoop()
                             && activeHapticSessionId == effectChains[i]->sessionId()) {
                         // Haptic data is active in this case, copy it directly from
                         // in buffer to out buffer.
+                        // PICO: the chain buffers of a non spatialized session of a spatializer
+                        // thread are in the HAL channel mask.
+                        const uint32_t channelCount =
+                                (mType == SPATIALIZER && !isHapticSessionSpatialized) ?
+                                        mChannelCount : mixerChannelCount;
                         const size_t audioBufferSize = mNormalFrameCount
-                                * audio_bytes_per_frame(mChannelCount, EFFECT_BUFFER_FORMAT);
+                                * audio_bytes_per_frame(channelCount, EFFECT_BUFFER_FORMAT);
                         memcpy_by_audio_format(
                                 (uint8_t*)effectChains[i]->outBuffer() + audioBufferSize,
                                 EFFECT_BUFFER_FORMAT,
@@ -3711,8 +4178,10 @@ bool AudioFlinger::PlaybackThread::threadLoop()
         if (mEffectBufferValid) {
             //ALOGV("writing effect buffer to sink buffer format %#x", mFormat);
 
+            // PICO: the output of a spatializer thread is in mPostSpatializerBuffer
+            void *effectBuffer = (mType == SPATIALIZER) ? mPostSpatializerBuffer : mEffectBuffer;
             if (requireMonoBlend()) {
-                mono_blend(mEffectBuffer, mEffectBufferFormat, mChannelCount, mNormalFrameCount,
+                mono_blend(effectBuffer, mEffectBufferFormat, mChannelCount, mNormalFrameCount,
                            true /*limit*/);
             }
 
@@ -3721,10 +4190,27 @@ bool AudioFlinger::PlaybackThread::threadLoop()
                 // We do it here if there is no FastMixer.
                 // mBalance detects zero balance within the class for speed (not needed here).
                 mBalance.setBalance(mMasterBalance.load());
-                mBalance.process((float *)mEffectBuffer, mNormalFrameCount);
+                mBalance.process((float *)effectBuffer, mNormalFrameCount);
             }
 
-            memcpy_by_audio_format(mSinkBuffer, mFormat, mEffectBuffer, mEffectBufferFormat,
+            // PICO: for a SPATIALIZER thread, move the haptics channels from mEffectBuffer to
+            // mPostSpatializerBuffer if the haptics track is spatialized. Otherwise, the haptics
+            // channels are already in mPostSpatializerBuffer.
+            if (isHapticSessionSpatialized && mType == SPATIALIZER) {
+                const size_t srcBufferSize = mNormalFrameCount *
+                        audio_bytes_per_frame(audio_channel_count_from_out_mask(mMixerChannelMask),
+                                              mEffectBufferFormat);
+                const size_t dstBufferSize = mNormalFrameCount
+                        * audio_bytes_per_frame(mChannelCount, mEffectBufferFormat);
+
+                memcpy_by_audio_format((uint8_t*)mPostSpatializerBuffer + dstBufferSize,
+                                       mEffectBufferFormat,
+                                       (uint8_t*)mEffectBuffer + srcBufferSize,
+                                       mEffectBufferFormat,
+                                       mNormalFrameCount * mHapticChannelCount);
+            }
+
+            memcpy_by_audio_format(mSinkBuffer, mFormat, effectBuffer, mEffectBufferFormat,
                     mNormalFrameCount * (mChannelCount + mHapticChannelCount));
             // The sample data is partially interleaved when haptic channels exist,
             // we need to adjust channels here.
@@ -3779,7 +4265,8 @@ bool AudioFlinger::PlaybackThread::threadLoop()
 
                             // write blocked detection
                             const int64_t deltaWriteNs = lastIoEndNs - lastIoBeginNs;
-                            if (mType == MIXER && deltaWriteNs > maxPeriod) {
+                            if ((mType == MIXER || mType == SPATIALIZER) // PICO: SPATIALIZER
+                                    && deltaWriteNs > maxPeriod) {
                                 mNumDelayedWrites++;
                                 if ((lastIoEndNs - lastWarning) > kWarningThrottleNs) {
                                     ATRACE_NAME("underrun");
@@ -3800,7 +4287,7 @@ bool AudioFlinger::PlaybackThread::threadLoop()
                         (mMixerStatus == MIXER_DRAIN_ALL)) {
                     threadLoop_drain();
                 }
-                if (mType == MIXER && !mStandby) {
+                if ((mType == MIXER || mType == SPATIALIZER) && !mStandby) { // PICO: SPATIALIZER
 
                     if (mThreadThrottle
                             && mMixerStatus == MIXER_TRACKS_READY // we are mixing (active tracks)
@@ -4167,8 +4654,9 @@ void AudioFlinger::PlaybackThread::toAudioPortConfig(struct audio_port_config *c
 // ----------------------------------------------------------------------------
 
 AudioFlinger::MixerThread::MixerThread(const sp<AudioFlinger>& audioFlinger, AudioStreamOut* output,
-        audio_io_handle_t id, audio_devices_t device, bool systemReady, type_t type)
-    :   PlaybackThread(audioFlinger, output, id, device, type, systemReady),
+        audio_io_handle_t id, audio_devices_t device, bool systemReady, type_t type,
+        audio_config_base_t *mixerConfig)
+    :   PlaybackThread(audioFlinger, output, id, device, type, systemReady, mixerConfig),
         // mAudioMixer below
         // mFastMixer below
         mFastMixerFutex(0),
@@ -4219,8 +4707,10 @@ AudioFlinger::MixerThread::MixerThread(const sp<AudioFlinger>& audioFlinger, Aud
         // where the period is less than an experimentally determined threshold that can be
         // scheduled reliably with CFS. However, the BT A2DP HAL is
         // bursty (does not pull at a regular rate) and so cannot operate with FastMixer.
+        // PICO: no fast mixer on a spatializer thread
         initFastMixer = mFrameCount < mNormalFrameCount
-                && (mOutDevice & AUDIO_DEVICE_OUT_ALL_A2DP) == 0;
+                && (mOutDevice & AUDIO_DEVICE_OUT_ALL_A2DP) == 0
+                && mType != SPATIALIZER;
         break;
     }
     ALOGW_IF(initFastMixer == false && mFrameCount < mNormalFrameCount,
@@ -4580,6 +5070,10 @@ void AudioFlinger::MixerThread::threadLoop_sleepTime()
         // before effects processing or output.
         if (mMixerBufferValid) {
             memset(mMixerBuffer, 0, mMixerBufferSize);
+            // PICO: the sink buffer of a spatializer thread is also cleared
+            if (mType == SPATIALIZER) {
+                memset(mSinkBuffer, 0, mSinkBufferSize);
+            }
         } else {
             memset(mSinkBuffer, 0, mSinkBufferSize);
         }
@@ -5071,11 +5565,21 @@ AudioFlinger::PlaybackThread::mixer_state AudioFlinger::MixerThread::prepareTrac
                 trackId,
                 AudioMixer::TRACK,
                 AudioMixer::CHANNEL_MASK, (void *)(uintptr_t)track->channelMask());
-            mAudioMixer->setParameter(
-                trackId,
-                AudioMixer::TRACK,
-                AudioMixer::MIXER_CHANNEL_MASK,
-                (void *)(uintptr_t)(mChannelMask | mHapticChannelMask));
+            // PICO: on a spatializer thread, the tracks not spatialized are mixed in the HAL
+            // channel mask, the spatialized tracks in the mixer channel mask.
+            if (mType == SPATIALIZER && !track->isSpatializationEnabled()) {
+                mAudioMixer->setParameter(
+                    trackId,
+                    AudioMixer::TRACK,
+                    AudioMixer::MIXER_CHANNEL_MASK,
+                    (void *)(uintptr_t)(mChannelMask | mHapticChannelMask));
+            } else {
+                mAudioMixer->setParameter(
+                    trackId,
+                    AudioMixer::TRACK,
+                    AudioMixer::MIXER_CHANNEL_MASK,
+                    (void *)(uintptr_t)(mMixerChannelMask | mHapticChannelMask));
+            }
             // limit track sample rate to 2 x output sample rate, which changes at re-configuration
             uint32_t maxSampleRate = mSampleRate * AUDIO_RESAMPLER_DOWN_RATIO_MAX;
             uint32_t reqSampleRate = proxy->getSampleRate();
@@ -5112,16 +5616,29 @@ AudioFlinger::PlaybackThread::mixer_state AudioFlinger::MixerThread::prepareTrac
             if (mMixerBufferEnabled
                     && (track->mainBuffer() == mSinkBuffer
                             || track->mainBuffer() == mMixerBuffer)) {
-                mAudioMixer->setParameter(
-                        trackId,
-                        AudioMixer::TRACK,
-                        AudioMixer::MIXER_FORMAT, (void *)mMixerBufferFormat);
-                mAudioMixer->setParameter(
-                        trackId,
-                        AudioMixer::TRACK,
-                        AudioMixer::MAIN_BUFFER, (void *)mMixerBuffer);
-                // TODO: override track->mainBuffer()?
-                mMixerBufferValid = true;
+                // PICO: the tracks not spatialized of a spatializer thread are mixed directly
+                // into the post spatializer buffer.
+                if (mType == SPATIALIZER && !track->isSpatializationEnabled()) {
+                    mAudioMixer->setParameter(
+                            trackId,
+                            AudioMixer::TRACK,
+                            AudioMixer::MIXER_FORMAT, (void *)mEffectBufferFormat);
+                    mAudioMixer->setParameter(
+                            trackId,
+                            AudioMixer::TRACK,
+                            AudioMixer::MAIN_BUFFER, (void *)mPostSpatializerBuffer);
+                } else {
+                    mAudioMixer->setParameter(
+                            trackId,
+                            AudioMixer::TRACK,
+                            AudioMixer::MIXER_FORMAT, (void *)mMixerBufferFormat);
+                    mAudioMixer->setParameter(
+                            trackId,
+                            AudioMixer::TRACK,
+                            AudioMixer::MAIN_BUFFER, (void *)mMixerBuffer);
+                    // TODO: override track->mainBuffer()?
+                    mMixerBufferValid = true;
+                }
             } else {
                 mAudioMixer->setParameter(
                         trackId,
@@ -5285,7 +5802,9 @@ AudioFlinger::PlaybackThread::mixer_state AudioFlinger::MixerThread::prepareTrac
     // remove all the tracks that need to be...
     removeTracks_l(*tracksToRemove);
 
-    if (getEffectChain_l(AUDIO_SESSION_OUTPUT_MIX) != 0) {
+    // PICO: also the output stage chain (spatializer)
+    if (getEffectChain_l(AUDIO_SESSION_OUTPUT_MIX) != 0
+            || getEffectChain_l(AUDIO_SESSION_OUTPUT_STAGE) != 0) {
         mEffectBufferValid = true;
     }
 
@@ -5293,12 +5812,18 @@ AudioFlinger::PlaybackThread::mixer_state AudioFlinger::MixerThread::prepareTrac
         // as long as there are effects we should clear the effects buffer, to avoid
         // passing a non-clean buffer to the effect chain
         memset(mEffectBuffer, 0, mEffectBufferSize);
+        // PICO
+        if (mType == SPATIALIZER) {
+            memset(mPostSpatializerBuffer, 0, mPostSpatializerBufferSize);
+        }
     }
     // sink or mix buffer must be cleared if all tracks are connected to an
     // effect chain as in this case the mixer will not write to the sink or mix buffer
     // and track effects will accumulate into it
-    if ((mBytesRemaining == 0) && ((mixedTracks != 0 && mixedTracks == tracksWithEffect) ||
-            (mixedTracks == 0 && fastTracks > 0))) {
+    // PICO: always clear the sink buffer of a spatializer output as the output of the
+    // spatializer effect is accumulated into it
+    if ((mBytesRemaining == 0) && (((mixedTracks != 0 && mixedTracks == tracksWithEffect) ||
+            (mixedTracks == 0 && fastTracks > 0)) || (mType == SPATIALIZER))) {
         // FIXME as a performance optimization, should remember previous zero status
         if (mMixerBufferValid) {
             memset(mMixerBuffer, 0, mMixerBufferSize);
@@ -5527,6 +6052,81 @@ void AudioFlinger::MixerThread::cacheParameters_l()
     // increase threshold again due to low power audio mode. The way this warning
     // threshold is calculated and its usefulness should be reconsidered anyway.
     maxPeriod = seconds(mNormalFrameCount) / mSampleRate * 15;
+}
+
+// ----------------------------------------------------------------------------
+// PICO: spatial audio backport
+
+AudioFlinger::SpatializerThread::SpatializerThread(const sp<AudioFlinger>& audioFlinger,
+                                                   AudioStreamOut* output,
+                                                   audio_io_handle_t id,
+                                                   audio_devices_t device,
+                                                   bool systemReady,
+                                                   audio_config_base_t *mixerConfig)
+    : MixerThread(audioFlinger, output, id, device, systemReady, SPATIALIZER, mixerConfig)
+{
+}
+
+AudioFlinger::SpatializerThread::~SpatializerThread()
+{
+}
+
+// Inserts a downmixer in the output stage chain when it has no spatializer (nor downmixer) and
+// removes it when a spatializer is added.
+// Note: like in the factory PICO OS 5.13.7 audioflinger, nothing calls this method (the thread
+// loop does not check the output stage effects); it is kept for completeness.
+void AudioFlinger::SpatializerThread::checkOutputStageEffects()
+{
+    bool hasVirtualizer = false;
+    bool hasDownMixer = false;
+    sp<EffectHandle> finalDownMixer;
+    {
+        Mutex::Autolock _l(mLock);
+        sp<EffectChain> chain = getEffectChain_l(AUDIO_SESSION_OUTPUT_STAGE);
+        if (chain != 0) {
+            hasVirtualizer = chain->getEffectFromType_l(FX_IID_SPATIALIZER) != nullptr;
+            hasDownMixer = chain->getEffectFromType_l(EFFECT_UIID_DOWNMIX) != nullptr;
+        }
+
+        finalDownMixer = mFinalDownMixer;
+        mFinalDownMixer.clear();
+    }
+
+    if (hasVirtualizer) {
+        if (finalDownMixer != nullptr) {
+            status_t status = finalDownMixer->disable();
+            if (status != NO_ERROR) {
+                ALOGE("disable downmixer error %d", status);
+            }
+        }
+        finalDownMixer.clear();
+    } else if (!hasDownMixer) {
+        effect_descriptor_t descriptor = {};
+        status_t status = mAudioFlinger->mEffectsFactoryHal->getDescriptor(
+                EFFECT_UIID_DOWNMIX, &descriptor);
+        if (status != NO_ERROR) {
+            return;
+        }
+
+        finalDownMixer = createEffect_l(nullptr /*client*/, nullptr /*effectClient*/,
+                0 /*priority*/, AUDIO_SESSION_OUTPUT_STAGE, &descriptor, nullptr /*enabled*/,
+                &status, false /*pinned*/);
+
+        if (finalDownMixer == nullptr || (status != NO_ERROR && status != ALREADY_EXISTS)) {
+            ALOGW("%s error creating downmixer %d", __func__, status);
+            finalDownMixer.clear();
+        } else {
+            status = finalDownMixer->enable();
+            if (status != NO_ERROR) {
+                ALOGE("enable downmixer error %d", status);
+            }
+        }
+    }
+
+    {
+        Mutex::Autolock _l(mLock);
+        mFinalDownMixer = finalDownMixer;
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -8743,6 +9343,7 @@ status_t AudioFlinger::MmapThread::start(const AudioClient& client,
                 (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_MMAP_NOIRQ | AUDIO_OUTPUT_FLAG_DIRECT);
         audio_port_handle_t deviceId = mDeviceId;
         std::vector<audio_io_handle_t> secondaryOutputs;
+        bool isSpatialized; // PICO: ignored, mmap outputs are never spatialized
         ret = AudioSystem::getOutputForAttr(&mAttr, &io,
                                             mSessionId,
                                             &stream,
@@ -8752,6 +9353,7 @@ status_t AudioFlinger::MmapThread::start(const AudioClient& client,
                                             flags,
                                             &deviceId,
                                             &portId,
+                                            &isSpatialized,
                                             &secondaryOutputs);
         ALOGD_IF(!secondaryOutputs.empty(),
                  "MmapThread::start does not support secondary outputs, ignoring them");

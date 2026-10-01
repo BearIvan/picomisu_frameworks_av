@@ -529,7 +529,8 @@ AudioFlinger::PlaybackThread::Track::Track(
             audio_output_flags_t flags,
             track_type type,
             audio_port_handle_t portId,
-            size_t frameCountToBeReady)
+            size_t frameCountToBeReady,
+            bool isSpatialized)
     :   TrackBase(thread, client, attr, sampleRate, format, channelMask, frameCount,
                   (sharedBuffer != 0) ? sharedBuffer->pointer() : buffer,
                   (sharedBuffer != 0) ? sharedBuffer->size() : bufferSize,
@@ -556,7 +557,8 @@ AudioFlinger::PlaybackThread::Track::Track(
     mFinalVolume(0.f),
     mResumeToStopping(false),
     mFlushHwPending(false),
-    mFlags(flags)
+    mFlags(flags),
+    mIsSpatialized(isSpatialized) // PICO
 {
     // client == 0 implies sharedBuffer == 0
     ALOG_ASSERT(!(client == 0 && sharedBuffer != 0));
@@ -735,6 +737,7 @@ void AudioFlinger::PlaybackThread::Track::appendDumpHeader(String8& result)
                         "ST Usg CT "
                         " G db  L dB  R dB  VS dB "
                         "  Server FrmCnt  FrmRdy F Underruns  Flushed"
+                        " ReqSpatial Spatial" // PICO
                         "%s\n",
                         isServerLatencySupported() ? "   Latency" : "");
 }
@@ -820,7 +823,8 @@ void AudioFlinger::PlaybackThread::Track::appendDump(String8& result, bool activ
                         "%08X %08X %6u "
                         "%2u %3x %2x "
                         "%5.2g %5.2g %5.2g %5.2g%c "
-                        "%08X %6zu%c %6zu %c %9u%c %7u",
+                        "%08X %6zu%c %6zu %c %9u%c %7u"
+                        " %10d %7d", // PICO: ReqSpatial Spatial
             active ? "yes" : "no",
             (mClient == 0) ? getpid() : mClient->pid(),
             mSessionId,
@@ -849,7 +853,9 @@ void AudioFlinger::PlaybackThread::Track::appendDump(String8& result, bool activ
             fillingStatus,
             mAudioTrackServerProxy->getUnderrunFrames(),
             nowInUnderrun,
-            (unsigned)mAudioTrackServerProxy->framesFlushed() % 10000000
+            (unsigned)mAudioTrackServerProxy->framesFlushed() % 10000000,
+            isSpatialized(),           // PICO
+            isSpatializationEnabled()  // PICO
             );
 
     if (isServerLatencySupported()) {

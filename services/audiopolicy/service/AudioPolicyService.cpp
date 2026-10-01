@@ -36,9 +36,11 @@
 #include <utils/String16.h>
 #include <utils/threads.h>
 #include "AudioPolicyService.h"
+#include "Spatializer.h"
 #include <hardware_legacy/power.h>
 #include <media/AudioEffect.h>
 #include <media/AudioParameter.h>
+#include <media/PicoAudioDefs.h>
 #include <mediautils/ServiceUtilities.h>
 #include <sensorprivacy/SensorPrivacyManager.h>
 
@@ -89,6 +91,18 @@ void AudioPolicyService::onFirstRef()
 
     mSensorPrivacyPolicy = new SensorPrivacyPolicy(this);
     mSensorPrivacyPolicy->registerSelf();
+
+    // PICO: Create spatializer if supported
+    if (mAudioPolicyManager != nullptr) {
+        Mutex::Autolock _l(mLock);
+        audio_attributes_t attr = attributes_initializer(AUDIO_USAGE_MEDIA);
+        attr.flags = AUDIO_FLAG_ALWAYS_SPATIALIZE;
+        AudioDeviceTypeAddrForSpatialVector devices;
+        bool hasSpatializer = mAudioPolicyManager->canBeSpatialized(&attr, nullptr, devices);
+        if (hasSpatializer) {
+            mSpatializer = Spatializer::create(this);
+        }
+    }
 }
 
 AudioPolicyService::~AudioPolicyService()
@@ -312,6 +326,10 @@ void AudioPolicyService::NotificationClient::binderDied(const wp<IBinder>& who _
     sp<AudioPolicyService> service = mService.promote();
     if (service != 0) {
         service->removeNotificationClient(mUid, mPid);
+        // PICO: forget the spatial audio state of the players of the dead process
+        if (service->mSpatializer != nullptr) {
+            service->mSpatializer->releasePlayers(mPid);
+        }
     }
 }
 
@@ -762,7 +780,86 @@ void AudioPolicyService::doSetParameters(const String8& keyValuePairs)
     }
 }
 
-status_t AudioPolicyService::dump(int fd, const Vector<String16>& args __unused)
+// PICO: spatial audio backport (Android 13 spatializer)
+
+void AudioPolicyService::onCheckSpatializer()
+{
+    Mutex::Autolock _l(mLock);
+    onCheckSpatializer_l();
+}
+
+void AudioPolicyService::onCheckSpatializer_l()
+{
+    if (mSpatializer != nullptr) {
+        mOutputCommandThread->checkSpatializerCommand();
+    }
+}
+
+void AudioPolicyService::doOnCheckSpatializer()
+{
+    Mutex::Autolock _l(mLock);
+    ALOGD("%s mSpatializer %p level %d", __func__, mSpatializer.get(),
+          (int)mSpatializer->getLevel());
+
+    if (mSpatializer != nullptr) {
+        // Note: mSpatializer != nullptr =>  mAudioPolicyManager != nullptr
+        if (mSpatializer->getLevel() != media::ISpatializationLevel::NONE) {
+            audio_io_handle_t currentOutput = mSpatializer->getOutput();
+            audio_io_handle_t newOutput;
+            audio_attributes_t attr = attributes_initializer(AUDIO_USAGE_MEDIA);
+            attr.flags = AUDIO_FLAG_ALWAYS_SPATIALIZE;
+            audio_config_base_t config = mSpatializer->getAudioInConfig();
+
+            status_t status =
+                    mAudioPolicyManager->getSpatializerOutput(&config, &attr, &newOutput);
+            ALOGV("%s currentOutput %d newOutput %d channel_mask %#x",
+                    __func__, currentOutput, newOutput, config.channel_mask);
+            if (status == NO_ERROR && currentOutput == newOutput) {
+                return;
+            }
+            mLock.unlock();
+            // It is OK to call detachOutput() is none is already attached.
+            mSpatializer->detachOutput();
+            if (status == NO_ERROR && newOutput != AUDIO_IO_HANDLE_NONE) {
+                status = mSpatializer->attachOutput(newOutput);
+                mLock.lock();
+                if (status != NO_ERROR) {
+                    mAudioPolicyManager->releaseSpatializerOutput(newOutput);
+                }
+            } else {
+                mLock.lock();
+            }
+        } else if (mSpatializer->getLevel() == media::ISpatializationLevel::NONE
+                               && mSpatializer->getOutput() != AUDIO_IO_HANDLE_NONE) {
+            mLock.unlock();
+            audio_io_handle_t output = mSpatializer->detachOutput();
+            mLock.lock();
+            if (output != AUDIO_IO_HANDLE_NONE) {
+                mAudioPolicyManager->releaseSpatializerOutput(output);
+            }
+        }
+    }
+}
+
+status_t AudioPolicyService::onSetSpatializationEnabled(audio_io_handle_t output,
+                                                        audio_port_handle_t portId, bool enabled)
+{
+    return mAudioPolicyClient->setSpatializationEnabled(output, portId, enabled);
+}
+
+status_t AudioPolicyService::onInvalidateTrack(audio_io_handle_t output,
+                                               audio_port_handle_t portId)
+{
+    return mAudioPolicyClient->invalidateTrack(output, portId);
+}
+
+status_t AudioPolicyService::onSetMixerConfig(audio_io_handle_t output,
+                                              const audio_config_base_t& config)
+{
+    return mAudioPolicyClient->setMixerConfig(output, config);
+}
+
+status_t AudioPolicyService::dump(int fd, const Vector<String16>& args)
 {
     if (!dumpAllowed()) {
         dumpPermissionDenial(fd);
@@ -785,6 +882,11 @@ status_t AudioPolicyService::dump(int fd, const Vector<String16>& args __unused)
         mPackageManager.dump(fd);
 
         if (locked) mLock.unlock();
+
+        // PICO
+        if (mSpatializer != nullptr) {
+            mSpatializer->dump(fd, args);
+        }
     }
     return NO_ERROR;
 }
@@ -1413,6 +1515,17 @@ bool AudioPolicyService::AudioCommandThread::threadLoop()
                         mLock.lock();
                     }
                     } break;
+                case CHECK_SPATIALIZER: {
+                    // PICO
+                    ALOGD("AudioCommandThread() processing check spatializer");
+                    svc = mService.promote();
+                    if (svc == 0) {
+                        break;
+                    }
+                    mLock.unlock();
+                    svc->doOnCheckSpatializer();
+                    mLock.lock();
+                    } break;
                 case SET_PARAMETERS_TO_POLICY: {
                     // PICO
                     ParametersData *data = (ParametersData *)command->mParam.get();
@@ -1596,6 +1709,15 @@ status_t AudioPolicyService::AudioCommandThread::setParametersToPolicyCommand(
     command->mParam = data;
     command->mWaitStatus = false;
     return sendCommand(command);
+}
+
+// PICO
+void AudioPolicyService::AudioCommandThread::checkSpatializerCommand()
+{
+    sp<AudioCommand>command = new AudioCommand();
+    command->mCommand = CHECK_SPATIALIZER;
+    ALOGV("AudioCommandThread() adding check spatializer");
+    sendCommand(command);
 }
 
 void AudioPolicyService::AudioCommandThread::stopOutputCommand(audio_port_handle_t portId)

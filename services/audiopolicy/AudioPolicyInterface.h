@@ -23,6 +23,8 @@
 
 namespace android {
 
+class SwAudioOutputDescriptor;
+
 // ----------------------------------------------------------------------------
 
 // The AudioPolicyInterface and AudioPolicyClientInterface classes define the communication interfaces
@@ -104,6 +106,8 @@ public:
 
     // request an output appropriate for playback of the supplied stream type and parameters
     virtual audio_io_handle_t getOutput(audio_stream_type_t stream) = 0;
+    // PICO: *isSpatialized is set when the output is the spatializer output (spatial audio
+    // backport, factory vtable slot 11).
     virtual status_t getOutputForAttr(const audio_attributes_t *attr,
                                         audio_io_handle_t *output,
                                         audio_session_t session,
@@ -113,6 +117,7 @@ public:
                                         audio_output_flags_t *flags,
                                         audio_port_handle_t *selectedDeviceId,
                                         audio_port_handle_t *portId,
+                                        bool *isSpatialized,
                                         std::vector<audio_io_handle_t> *secondaryOutputs) = 0;
     // indicates to the audio policy manager that the output starts being used by corresponding stream.
     virtual status_t startOutput(audio_port_handle_t portId) = 0;
@@ -279,6 +284,24 @@ public:
     // PICO: record silencing of all the clients of a uid (AudioSystem::setRecordSilenced()),
     // reported in the recording configurations.
     virtual void     setRecordSilencedState(uid_t uid, bool silenced) = 0;
+
+    // PICO: spatial audio backport (factory AudioPolicyManager vtable slots 70..73), used by the
+    // spatializer of the audio policy service.
+    // Whether a playback with these attributes (media or game usage with the
+    // AudioAttributes.FLAG_ALWAYS_SPATIALIZE flag) can be spatialized on these devices (on any
+    // available device when empty); the configuration is not checked.
+    virtual bool     canBeSpatialized(const audio_attributes_t *attr,
+                                      const audio_config_t *config,
+                                      const AudioDeviceTypeAddrForSpatialVector &devices) const = 0;
+    // Opens (or returns the already opened) spatializer output reaching the devices of the
+    // attributes (not null).
+    virtual status_t getSpatializerOutput(const audio_config_base_t *config,
+                                          const audio_attributes_t *attr,
+                                          audio_io_handle_t *output) = 0;
+    // Closes the spatializer output unless it is the only route to some device.
+    virtual status_t releaseSpatializerOutput(audio_io_handle_t output) = 0;
+    // The descriptor of an opened output, nullptr if unknown.
+    virtual sp<SwAudioOutputDescriptor> getOutputDescriptor(audio_io_handle_t output) = 0;
 };
 
 

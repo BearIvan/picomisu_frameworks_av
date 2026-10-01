@@ -37,6 +37,7 @@
 #include <media/audiohal/DevicesFactoryHalInterface.h>
 #include <media/audiohal/EffectsFactoryHalInterface.h>
 #include <media/AudioParameter.h>
+#include <media/PicoAudioDefs.h>
 #include <media/TypeConverter.h>
 #include <memunreachable/memunreachable.h>
 #include <utils/String16.h>
@@ -314,6 +315,7 @@ status_t AudioFlinger::openMmapStream(MmapStreamInterface::stream_direction_t di
         fullConfig.channel_mask = config->channel_mask;
         fullConfig.format = config->format;
         std::vector<audio_io_handle_t> secondaryOutputs;
+        bool isSpatialized; // PICO: ignored, mmap outputs are never spatialized
 
         ret = AudioSystem::getOutputForAttr(&localAttr, &io,
                                             actualSessionId,
@@ -321,7 +323,7 @@ status_t AudioFlinger::openMmapStream(MmapStreamInterface::stream_direction_t di
                                             &fullConfig,
                                             (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_MMAP_NOIRQ |
                                                     AUDIO_OUTPUT_FLAG_DIRECT),
-                                            deviceId, &portId, &secondaryOutputs);
+                                            deviceId, &portId, &isSpatialized, &secondaryOutputs);
         ALOGW_IF(!secondaryOutputs.empty(),
                  "%s does not support secondary outputs, ignoring them", __func__);
     } else {
@@ -698,6 +700,7 @@ sp<IAudioTrack> AudioFlinger::createTrack(const CreateTrackInput& input,
     audio_stream_type_t streamType;
     audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE;
     std::vector<audio_io_handle_t> secondaryOutputs;
+    bool isSpatialized = false; // PICO: spatialization requested by the audio policy
 
     bool updatePid = (input.clientInfo.clientPid == -1);
     const uid_t callingUid = IPCThreadState::self()->getCallingUid();
@@ -735,7 +738,8 @@ sp<IAudioTrack> AudioFlinger::createTrack(const CreateTrackInput& input,
     output.selectedDeviceId = input.selectedDeviceId;
     lStatus = AudioSystem::getOutputForAttr(&localAttr, &output.outputId, sessionId, &streamType,
                                             clientPid, clientUid, &input.config, input.flags,
-                                            &output.selectedDeviceId, &portId, &secondaryOutputs);
+                                            &output.selectedDeviceId, &portId, &isSpatialized,
+                                            &secondaryOutputs);
 
     if (lStatus != NO_ERROR || output.outputId == AUDIO_IO_HANDLE_NONE) {
         ALOGE("createTrack() getOutputForAttr() return error %d or invalid output handle", lStatus);
@@ -800,7 +804,7 @@ sp<IAudioTrack> AudioFlinger::createTrack(const CreateTrackInput& input,
                                       input.notificationsPerBuffer, input.speed,
                                       input.sharedBuffer, sessionId, &output.flags,
                                       callingPid, input.clientInfo.clientTid, clientUid,
-                                      &lStatus, portId);
+                                      &lStatus, portId, isSpatialized);
         LOG_ALWAYS_FATAL_IF((lStatus == NO_ERROR) && (track == 0));
         // we don't abort yet if lStatus != NO_ERROR; there is still work to be done regardless
 
@@ -2376,6 +2380,75 @@ status_t AudioFlinger::getMicrophones(std::vector<media::MicrophoneInfo> *microp
     return status;
 }
 
+// PICO: spatial audio backport, called by the spatializer of the audio policy service
+
+status_t AudioFlinger::invalidateTrack(audio_io_handle_t output, audio_port_handle_t portId)
+{
+    Mutex::Autolock _l(mLock);
+    PlaybackThread *thread = checkPlaybackThread_l(output);
+    if (thread == NULL) {
+        ALOGE("no playback thread found for output handle %d", output);
+        return BAD_VALUE;
+    }
+    Mutex::Autolock _tl(thread->mLock);
+    for (size_t i = 0; i < thread->mTracks.size(); i++) {
+        sp<PlaybackThread::Track> track = thread->mTracks[i];
+        if (track->portId() == portId) {
+            track->invalidate();
+            return NO_ERROR;
+        }
+    }
+    return BAD_VALUE;
+}
+
+status_t AudioFlinger::setMixerConfig(audio_io_handle_t output, const audio_config_base_t& config)
+{
+    Mutex::Autolock _l(mLock);
+    PlaybackThread *thread = checkPlaybackThread_l(output);
+    if (thread == NULL) {
+        ALOGE("no playback thread found for output handle %d", output);
+        return BAD_VALUE;
+    }
+    if (thread->type() != ThreadBase::SPATIALIZER) {
+        ALOGE("only spatializer support setMixerConfig io %d, channelMask 0x%x",
+                output, config.channel_mask);
+        return BAD_VALUE;
+    }
+    Mutex::Autolock _tl(thread->mLock);
+    // applied by PlaybackThread::doSetMixerConfig_l() on the thread loop
+    sp<ThreadBase::ConfigEvent> configEvent =
+            (ThreadBase::ConfigEvent *)new ThreadBase::SetMixerConfigEvent(config);
+    thread->sendConfigEvent_l(configEvent);
+    return NO_ERROR;
+}
+
+status_t AudioFlinger::setSpatializationEnabled(audio_io_handle_t output,
+                                                audio_port_handle_t portId, bool enabled)
+{
+    Mutex::Autolock _l(mLock);
+    PlaybackThread *thread = checkPlaybackThread_l(output);
+    if (thread == NULL) {
+        ALOGE("no playback thread found for output handle %d", output);
+        return BAD_VALUE;
+    }
+    if (thread->type() != ThreadBase::SPATIALIZER) {
+        ALOGE("only spatializer support enableSPatialization io %d, protId %d enable %d",
+                output, portId, enabled);
+        return BAD_VALUE;
+    }
+    Mutex::Autolock _tl(thread->mLock);
+    for (size_t i = 0; i < thread->mTracks.size(); i++) {
+        sp<PlaybackThread::Track> track = thread->mTracks[i];
+        if (track->portId() == portId) {
+            track->setRequestEnableSpatialization(enabled);
+            // applied by PlaybackThread::doUpdateTrackSpatialization_l() on the thread loop
+            thread->sendUpdateTrackSpatializationConfigEvent_l(portId);
+            return NO_ERROR;
+        }
+    }
+    return BAD_VALUE;
+}
+
 // setAudioHwSyncForSession_l() must be called with AudioFlinger::mLock held
 void AudioFlinger::setAudioHwSyncForSession_l(PlaybackThread *thread, audio_session_t sessionId)
 {
@@ -2465,6 +2538,16 @@ sp<AudioFlinger::ThreadBase> AudioFlinger::openOutput_l(audio_module_handle_t mo
             if (flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) {
                 thread = new OffloadThread(this, outputStream, *output, devices, mSystemReady);
                 ALOGV("openOutput_l() created offload output: ID %d thread %p",
+                      *output, thread.get());
+            } else if (flags & AUDIO_OUTPUT_FLAG_SPATIALIZER) {
+                // PICO: spatial audio backport. The spatializer mixer starts in 5.1, the
+                // spatializer of the audio policy service sets the mixer channel mask of its
+                // effect with setMixerConfig().
+                audio_config_base_t mixerConfig = {
+                        0 /*sample_rate*/, AUDIO_CHANNEL_OUT_5POINT1, AUDIO_FORMAT_DEFAULT};
+                thread = new SpatializerThread(this, outputStream, *output, devices,
+                                               mSystemReady, &mixerConfig);
+                ALOGV("openOutput_l() created spatializer output: ID %d thread %p",
                       *output, thread.get());
             } else if ((flags & AUDIO_OUTPUT_FLAG_DIRECT)
                     || !isValidPcmSinkFormat(config->format)
@@ -3463,6 +3546,15 @@ sp<IEffect> AudioFlinger::createEffect(
         if (sessionId != AUDIO_SESSION_OUTPUT_MIX &&
              (desc.flags & EFFECT_FLAG_TYPE_MASK) == EFFECT_FLAG_TYPE_AUXILIARY) {
             lStatus = INVALID_OPERATION;
+            goto Exit;
+        }
+
+        // PICO: only the audio policy service (spatializer) can create a spatializer effect
+        if ((memcmp(&desc.type, FX_IID_SPATIALIZER, sizeof(effect_uuid_t)) == 0) &&
+                (callingUid != AID_AUDIOSERVER || pid != getpid())) {
+            ALOGW("%s: attempt to create a spatializer effect from uid/pid %d/%d",
+                    __func__, callingUid, pid);
+            lStatus = PERMISSION_DENIED;
             goto Exit;
         }
 

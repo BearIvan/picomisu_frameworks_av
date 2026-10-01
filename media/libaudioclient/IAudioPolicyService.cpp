@@ -218,6 +218,7 @@ public:
                               audio_output_flags_t flags,
                               audio_port_handle_t *selectedDeviceId,
                               audio_port_handle_t *portId,
+                              bool *isSpatialized,
                               std::vector<audio_io_handle_t> *secondaryOutputs) override
         {
             Parcel data, reply;
@@ -275,6 +276,7 @@ public:
             }
             *selectedDeviceId = (audio_port_handle_t)reply.readInt32();
             *portId = (audio_port_handle_t)reply.readInt32();
+            *isSpatialized = reply.readInt32() != 0;   // PICO
             secondaryOutputs->resize(reply.readInt32());
             return reply.read(secondaryOutputs->data(),
                               secondaryOutputs->size() * sizeof(audio_io_handle_t));
@@ -1381,32 +1383,6 @@ IMPLEMENT_META_INTERFACE(AudioPolicyService, "android.media.IAudioPolicyService"
 
 // ----------------------------------------------------------------------
 
-// The audio policy service of this build has no spatializer (see IAudioPolicyService.h):
-// the in-process results of an audio policy service without it.
-
-status_t BnAudioPolicyService::getSpatializer(
-        const sp<media::INativeSpatializerCallback>& callback __unused,
-        sp<media::ISpatializer>* spatializer)
-{
-    *spatializer = nullptr;
-    return INVALID_OPERATION;
-}
-
-status_t BnAudioPolicyService::canBeSpatialized(
-        const audio_attributes_t *attr __unused, const audio_config_t *config __unused,
-        const AudioDeviceTypeAddrForSpatialVector &devices __unused, bool *canBeSpatialized)
-{
-    *canBeSpatialized = false;
-    return INVALID_OPERATION;
-}
-
-sp<media::ISpatializer> BnAudioPolicyService::getSpatializer()
-{
-    return nullptr;
-}
-
-// ----------------------------------------------------------------------
-
 status_t BnAudioPolicyService::onTransact(
     uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)
 {
@@ -1608,11 +1584,14 @@ status_t BnAudioPolicyService::onTransact(
             audio_port_handle_t selectedDeviceId = data.readInt32();
             audio_port_handle_t portId = (audio_port_handle_t)data.readInt32();
             audio_io_handle_t output = 0;
+            // PICO: as in the factory, isSpatialized is not written to the reply (the client
+            // reads it after portId; this transaction is reserved to audioserver).
+            bool isSpatialized = false;
             std::vector<audio_io_handle_t> secondaryOutputs;
             status = getOutputForAttr(&attr,
                     &output, session, &stream, pid, uid,
                     &config,
-                    flags, &selectedDeviceId, &portId, &secondaryOutputs);
+                    flags, &selectedDeviceId, &portId, &isSpatialized, &secondaryOutputs);
             reply->writeInt32(status);
             status = reply->write(&attr, sizeof(audio_attributes_t));
             if (status != NO_ERROR) {
@@ -2500,6 +2479,50 @@ status_t BnAudioPolicyService::onTransact(
                 return BAD_VALUE;
             }
             setRecordSilencedByName(packageName, silenced);
+            return NO_ERROR;
+        }
+
+        case GET_SPATIALIZER: {
+            // PICO
+            CHECK_INTERFACE(IAudioPolicyService, data, reply);
+            sp<media::INativeSpatializerCallback> callback =
+                    interface_cast<media::INativeSpatializerCallback>(data.readStrongBinder());
+            sp<media::ISpatializer> spatializer;
+            status_t status = getSpatializer(callback, &spatializer);
+            reply->writeInt32(status);
+            if (status == NO_ERROR) {
+                reply->writeStrongBinder(IInterface::asBinder(spatializer));
+            }
+            return NO_ERROR;
+        }
+
+        case CAN_BE_SPATIALIZED: {
+            // PICO
+            CHECK_INTERFACE(IAudioPolicyService, data, reply);
+            audio_attributes_t attr = AUDIO_ATTRIBUTES_INITIALIZER;
+            data.read(&attr, sizeof(audio_attributes_t));
+            audio_config_t config = AUDIO_CONFIG_INITIALIZER;
+            data.read(&config, sizeof(audio_config_t));
+            int32_t count = data.readInt32();
+            AudioDeviceTypeAddrForSpatialVector devices;
+            for (int32_t i = 0; i < count; i++) {
+                AudioDeviceTypeAddrForSpatial device;
+                device.readFromParcel(&data);
+                devices.push_back(device);
+            }
+            bool canBeSpatialized = false;
+            status_t status = this->canBeSpatialized(&attr, &config, devices, &canBeSpatialized);
+            reply->writeInt32(status);
+            if (status == NO_ERROR) {
+                reply->writeInt32(canBeSpatialized);
+            }
+            return NO_ERROR;
+        }
+
+        case GET_SPATIALIZER_SERVICE: {
+            // PICO
+            CHECK_INTERFACE(IAudioPolicyService, data, reply);
+            reply->writeStrongBinder(IInterface::asBinder(getSpatializer()));
             return NO_ERROR;
         }
 

@@ -564,13 +564,48 @@ void AudioFlinger::EffectModule::reset_l()
     mEffectInterface->command(EFFECT_CMD_RESET, 0, NULL, 0, NULL);
 }
 
+// PICO: spatial audio backport
+audio_channel_mask_t AudioFlinger::EffectModule::inChannelMask() const
+{
+    sp<ThreadBase> thread = mThread.promote();
+    if (thread == 0) {
+        return AUDIO_CHANNEL_NONE;
+    }
+    if (mThreadType == ThreadBase::SPATIALIZER) {
+        if (mSessionId == AUDIO_SESSION_OUTPUT_STAGE) {
+            // the first effect of the output stage (the spatializer) reads the mixer output
+            sp<EffectChain> chain = mChain.promote();
+            if (chain != 0 && chain->isFirstEffect(mId)) {
+                return thread->mixerChannelMask();
+            }
+        } else if (mSessionId > AUDIO_SESSION_OUTPUT_MIX
+                && thread->isSessionSpatialEnabled_l(mSessionId)) {
+            return thread->mixerChannelMask();
+        }
+    }
+    return thread->channelMask();
+}
+
+audio_channel_mask_t AudioFlinger::EffectModule::outChannelMask() const
+{
+    sp<ThreadBase> thread = mThread.promote();
+    if (thread == 0) {
+        return AUDIO_CHANNEL_NONE;
+    }
+    if (mThreadType == ThreadBase::SPATIALIZER
+            && mSessionId > AUDIO_SESSION_OUTPUT_MIX
+            && thread->isSessionSpatialEnabled_l(mSessionId)) {
+        return thread->mixerChannelMask();
+    }
+    return thread->channelMask();
+}
+
 status_t AudioFlinger::EffectModule::configure()
 {
     ALOGVV("configure() started");
     status_t status;
     sp<ThreadBase> thread;
     uint32_t size;
-    audio_channel_mask_t channelMask;
 
     if (mEffectInterface == 0) {
         status = NO_INIT;
@@ -587,9 +622,9 @@ status_t AudioFlinger::EffectModule::configure()
     // TODO: handle configuration of input (record) SW effects above the HAL,
     // similar to output EFFECT_FLAG_TYPE_INSERT/REPLACE,
     // in which case input channel masks should be used here.
-    channelMask = thread->channelMask();
-    mConfig.inputCfg.channels = channelMask;
-    mConfig.outputCfg.channels = channelMask;
+    // PICO: spatial audio backport, the channel masks depend on the spatialization
+    mConfig.inputCfg.channels = inChannelMask();
+    mConfig.outputCfg.channels = outChannelMask();
 
     if ((mDescriptor.flags & EFFECT_FLAG_TYPE_MASK) == EFFECT_FLAG_TYPE_AUXILIARY) {
         if (mConfig.inputCfg.channels != AUDIO_CHANNEL_OUT_MONO) {
@@ -608,7 +643,7 @@ status_t AudioFlinger::EffectModule::configure()
 #ifndef MULTICHANNEL_EFFECT_CHAIN
         // TODO: Update this logic when multichannel effects are implemented.
         // For offloaded tracks consider mono output as stereo for proper effect initialization
-        if (channelMask == AUDIO_CHANNEL_OUT_MONO) {
+        if (mConfig.outputCfg.channels == AUDIO_CHANNEL_OUT_MONO) {
             mConfig.inputCfg.channels = AUDIO_CHANNEL_OUT_STEREO;
             mConfig.outputCfg.channels = AUDIO_CHANNEL_OUT_STEREO;
             ALOGV("Overriding effect input and output as STEREO");
@@ -2245,21 +2280,48 @@ status_t AudioFlinger::EffectChain::addEffect_ll(const sp<EffectModule>& effect)
             }
         }
 
-        // always read samples from chain input buffer
-        effect->setInBuffer(mInBuffer);
-
-        // if last effect in the chain, output samples to chain
-        // output buffer, otherwise to chain input buffer
-        if (idx_insert == size) {
-            if (idx_insert != 0) {
-                mEffects[idx_insert-1]->setOutBuffer(mInBuffer);
-                mEffects[idx_insert-1]->configure();
-            }
-            effect->setOutBuffer(mOutBuffer);
-        } else {
-            effect->setOutBuffer(mInBuffer);
-        }
+        const size_t previousSize = size;
         mEffects.insertAt(effect, idx_insert);
+
+        // PICO: spatial audio backport
+        // - By default:
+        //   All effects read samples from chain input buffer.
+        //   The last effect in the chain, writes samples to chain output buffer,
+        //   otherwise to chain input buffer
+        // - In the OUTPUT_STAGE chain of a spatializer mixer thread:
+        //   The spatializer effect (first effect) reads samples from the input buffer
+        //   and writes samples to the output buffer.
+        //   All other effects read and writes samples to the output buffer
+        if (thread->type() == ThreadBase::SPATIALIZER
+                && mSessionId == AUDIO_SESSION_OUTPUT_STAGE) {
+            effect->setOutBuffer(mOutBuffer);
+            if (idx_insert == 0) {
+                if (previousSize != 0) {
+                    mEffects[1]->configure();
+                    mEffects[1]->setInBuffer(mOutBuffer);
+                    mEffects[1]->updateAccessMode();      // reconfig if needed.
+                }
+                effect->setInBuffer(mInBuffer);
+            } else {
+                effect->setInBuffer(mOutBuffer);
+            }
+        } else {
+            // always read samples from chain input buffer
+            effect->setInBuffer(mInBuffer);
+
+            // if last effect in the chain, output samples to chain
+            // output buffer, otherwise to chain input buffer
+            if (idx_insert == previousSize) {
+                if (idx_insert != 0) {
+                    mEffects[idx_insert-1]->configure();
+                    mEffects[idx_insert-1]->setOutBuffer(mInBuffer);
+                    mEffects[idx_insert-1]->updateAccessMode();      // reconfig if needed.
+                }
+                effect->setOutBuffer(mOutBuffer);
+            } else {
+                effect->setOutBuffer(mInBuffer);
+            }
+        }
 
         ALOGV("addEffect_l() effect %p, added in chain %p at rank %zu", effect.get(), this,
                 idx_insert);
@@ -2267,6 +2329,36 @@ status_t AudioFlinger::EffectChain::addEffect_ll(const sp<EffectModule>& effect)
     effect->configure();
 
     return NO_ERROR;
+}
+
+// PICO: spatial audio backport
+// updateBuffers_l() must be called with ThreadBase::mLock held
+void AudioFlinger::EffectChain::updateBuffers_l()
+{
+    Mutex::Autolock _l(mLock);
+    sp<ThreadBase> thread = mThread.promote();
+    if (thread == 0) {
+        return;
+    }
+    for (size_t i = 0; i < mEffects.size(); i++) {
+        if (thread->type() == ThreadBase::SPATIALIZER
+                && mSessionId == AUDIO_SESSION_OUTPUT_STAGE) {
+            // Note: as in the factory PICO OS 5.13.7 audioflinger, all the effects of the output
+            // stage of a spatializer thread read the chain input buffer here (addEffect_ll()
+            // connects the effects after the first one to the chain output buffer).
+            mEffects[i]->setOutBuffer(mOutBuffer);
+            mEffects[i]->setInBuffer(mInBuffer);
+        } else {
+            mEffects[i]->setInBuffer(mInBuffer);
+            // the last effect outputs to the chain output buffer, the others in place
+            if (i == mEffects.size() - 1) {
+                mEffects[i]->setOutBuffer(mOutBuffer);
+            } else {
+                mEffects[i]->setOutBuffer(mInBuffer);
+            }
+        }
+        mEffects[i]->configure();
+    }
 }
 
 // removeEffect_l() must be called with ThreadBase::mLock held

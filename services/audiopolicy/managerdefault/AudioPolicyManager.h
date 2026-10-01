@@ -122,6 +122,7 @@ public:
                                   audio_output_flags_t *flags,
                                   audio_port_handle_t *selectedDeviceId,
                                   audio_port_handle_t *portId,
+                                  bool *isSpatialized,
                                   std::vector<audio_io_handle_t> *secondaryOutputs) override;
         virtual status_t startOutput(audio_port_handle_t portId);
         virtual status_t stopOutput(audio_port_handle_t portId);
@@ -313,6 +314,16 @@ public:
 
         // PICO
         virtual void setRecordSilencedState(uid_t uid, bool silenced);
+
+        // PICO: spatial audio backport
+        virtual bool canBeSpatialized(const audio_attributes_t *attr,
+                                      const audio_config_t *config,
+                                      const AudioDeviceTypeAddrForSpatialVector &devices) const;
+        virtual status_t getSpatializerOutput(const audio_config_base_t *config,
+                                              const audio_attributes_t *attr,
+                                              audio_io_handle_t *output);
+        virtual status_t releaseSpatializerOutput(audio_io_handle_t output);
+        virtual sp<SwAudioOutputDescriptor> getOutputDescriptor(audio_io_handle_t output);
 
 protected:
         // A constructor that allows more fine-grained control over initialization process,
@@ -767,6 +778,10 @@ protected:
         std::unordered_set<audio_format_t> mManualSurroundFormats;
 
         std::unordered_map<uid_t, audio_flags_mask_t> mAllowedCapturePolicies;
+
+        // PICO: spatial audio backport, the output of the spatializer mixPort
+        // (AUDIO_OUTPUT_FLAG_SPATIALIZER) selected by getSpatializerOutput().
+        sp<SwAudioOutputDescriptor> mSpatializerOutput;
 protected:
         // Add or remove AC3 DTS encodings based on user preferences.
         void modifySurroundFormats(const sp<DeviceDescriptor>& devDesc, FormatVector *formatsPtr);
@@ -815,14 +830,19 @@ protected:
                 audio_output_flags_t *flags,
                 audio_port_handle_t *selectedDeviceId,
                 bool *isRequestedDeviceForExclusiveUse,
+                bool *isSpatialized,
                 std::vector<sp<SwAudioOutputDescriptor>> *secondaryDescs);
         // internal method to return the output handle for the given device and format
+        // PICO: returns the spatializer output (and sets *isSpatialized) for the content that
+        // can be spatialized (attr are the attributes of the client, may be null).
         virtual audio_io_handle_t getOutputForDevices(
                 const DeviceVector &devices,
                 audio_session_t session,
                 audio_stream_type_t stream,
                 const audio_config_t *config,
                 audio_output_flags_t *flags,
+                const audio_attributes_t *attr,
+                bool *isSpatialized,
                 bool forceMutingHaptic = false);
 
         /**
@@ -857,6 +877,31 @@ protected:
                                              const char *device_address,
                                              const char *device_name,
                                              audio_format_t encodedFormat);
+
+        // PICO: spatial audio backport.
+        // Media or game content that opted in (AudioAttributes.FLAG_ALWAYS_SPATIALIZE) can be
+        // spatialized when a spatializer mixPort reaches the devices (a device type mask, any
+        // available device when AUDIO_DEVICE_NONE).
+        virtual bool canBeSpatializedInt(const audio_attributes_t *attr,
+                                         const audio_config_t *config,
+                                         audio_devices_t devices) const;
+
+        // The spatializer mixPort reaching an available device and all the given device types.
+        sp<IOProfile> getSpatializerOutputProfile(const audio_config_t *config,
+                                                  audio_devices_t devices) const;
+
+        // Opens an output for the profile and devices (with its duplicating output when needed).
+        sp<SwAudioOutputDescriptor> openOutputWithProfileAndDevice(
+                const sp<IOProfile>& profile, const DeviceVector& devices,
+                const audio_config_base_t *mixerConfig = nullptr);
+
+        // Whether at least one device can only be reached through this output (always false
+        // for a duplicated output).
+        bool isOutputOnlyAvailableRouteToSomeDevice(const sp<SwAudioOutputDescriptor>& outputDesc);
+
+        // Invalidates the streams of the clients of the other outputs that can be spatialized,
+        // so that they move to the spatializer output.
+        void checkVirtualizerClientRoutes();
 
         void setEngineDeviceConnectionState(const sp<DeviceDescriptor> device,
                                       audio_policy_dev_state_t state);

@@ -241,6 +241,8 @@ public:
                                      audio_output_flags_t flags,
                                      audio_port_handle_t *selectedDeviceId,
                                      audio_port_handle_t *portId,
+                                     // PICO: set when the output is the spatializer output
+                                     bool *isSpatialized,
                                      std::vector<audio_io_handle_t> *secondaryOutputs);
     static status_t startOutput(audio_port_handle_t portId);
     static status_t stopOutput(audio_port_handle_t portId);

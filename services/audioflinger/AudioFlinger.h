@@ -284,6 +284,12 @@ public:
 
     virtual status_t getMicrophones(std::vector<media::MicrophoneInfo> *microphones);
 
+    // PICO: spatial audio backport
+    virtual status_t invalidateTrack(audio_io_handle_t output, audio_port_handle_t portId);
+    virtual status_t setMixerConfig(audio_io_handle_t output, const audio_config_base_t& config);
+    virtual status_t setSpatializationEnabled(audio_io_handle_t output,
+                                              audio_port_handle_t portId, bool enabled);
+
     virtual     status_t    onTransact(
                                 uint32_t code,
                                 const Parcel& data,

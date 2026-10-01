@@ -240,4 +240,39 @@ audio_unique_id_t AudioPolicyService::AudioPolicyClient::newAudioUniqueId(audio_
     return AudioSystem::newAudioUniqueId(use);
 }
 
+// PICO: spatializer requests of the audio policy service (SpatializerPolicyCallback)
+
+status_t AudioPolicyService::AudioPolicyClient::setSpatializationEnabled(
+        audio_io_handle_t output, audio_port_handle_t portId, bool enabled)
+{
+    sp<IAudioFlinger> af = AudioSystem::get_audio_flinger();
+    if (af == 0) {
+        return PERMISSION_DENIED;
+    }
+
+    return af->setSpatializationEnabled(output, portId, enabled);
+}
+
+status_t AudioPolicyService::AudioPolicyClient::invalidateTrack(audio_io_handle_t output,
+                                                                audio_port_handle_t portId)
+{
+    sp<IAudioFlinger> af = AudioSystem::get_audio_flinger();
+    if (af == 0) {
+        return PERMISSION_DENIED;
+    }
+
+    return af->invalidateTrack(output, portId);
+}
+
+status_t AudioPolicyService::AudioPolicyClient::setMixerConfig(audio_io_handle_t output,
+                                                               const audio_config_base_t& config)
+{
+    sp<IAudioFlinger> af = AudioSystem::get_audio_flinger();
+    if (af == 0) {
+        return PERMISSION_DENIED;
+    }
+
+    return af->setMixerConfig(output, config);
+}
+
 } // namespace android
