@@ -76,6 +76,9 @@ class StreamHalLocal : public virtual StreamHalInterface
     // (must match the priority of the audioflinger's thread that calls 'read' / 'write')
     virtual status_t setHalThreadPriority(int priority);
 
+    // PICO
+    virtual status_t setHalThreadCpuset(int group);
+
   protected:
     // Subclasses can not be constructed directly by clients.
     StreamHalLocal(audio_stream_t *stream, sp<DeviceHalLocal> device);

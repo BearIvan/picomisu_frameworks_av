@@ -82,6 +82,10 @@ class StreamHalInterface : public virtual RefBase
     // (must match the priority of the audioflinger's thread that calls 'read' / 'write')
     virtual status_t setHalThreadPriority(int priority) = 0;
 
+    // PICO: cpuset group of the thread that interacts with the HAL, applied when the
+    // output stream is prepared for writing (AudioFlinger spatializer thread)
+    virtual status_t setHalThreadCpuset(int group) = 0;
+
   protected:
     // Subclasses can not be constructed directly by clients.
     StreamHalInterface() {}

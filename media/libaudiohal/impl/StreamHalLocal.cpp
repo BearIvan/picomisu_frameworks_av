@@ -114,6 +114,11 @@ status_t StreamHalLocal::setHalThreadPriority(int) {
     return OK;
 }
 
+// PICO
+status_t StreamHalLocal::setHalThreadCpuset(int) {
+    return OK;
+}
+
 StreamOutHalLocal::StreamOutHalLocal(audio_stream_out_t *stream, sp<DeviceHalLocal> device)
         : StreamHalLocal(&stream->common, device), mStream(stream) {
 }

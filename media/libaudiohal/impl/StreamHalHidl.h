@@ -96,6 +96,9 @@ class StreamHalHidl : public virtual StreamHalInterface, public ConversionHelper
     // (must match the priority of the audioflinger's thread that calls 'read' / 'write')
     virtual status_t setHalThreadPriority(int priority);
 
+    // PICO: cpuset group of the HAL writer thread (factory StreamHalHidl::setHalThreadCpuset)
+    virtual status_t setHalThreadCpuset(int group);
+
   protected:
     // Subclasses can not be constructed directly by clients.
     explicit StreamHalHidl(IStream *stream);
@@ -106,6 +109,8 @@ class StreamHalHidl : public virtual StreamHalInterface, public ConversionHelper
     status_t getCachedBufferSize(size_t *size);
 
     bool requestHalThreadPriority(pid_t threadPid, pid_t threadId);
+    // PICO
+    bool requestHalThreadCpuset(pid_t threadPid, pid_t threadId);
 
     // mStreamPowerLog is used for audio signal power logging.
     StreamPowerLog mStreamPowerLog;
@@ -115,6 +120,9 @@ class StreamHalHidl : public virtual StreamHalInterface, public ConversionHelper
     IStream *mStream;
     int mHalThreadPriority;
     size_t mCachedBufferSize;
+    // PICO
+    const int HAL_THREAD_CPUSET_DEFAULT = -1;
+    int mHalThreadCpuset;
 };
 
 class StreamOutHalHidl : public StreamOutHalInterface, public StreamHalHidl {

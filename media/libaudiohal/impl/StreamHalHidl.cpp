@@ -45,7 +45,8 @@ StreamHalHidl::StreamHalHidl(IStream *stream)
         : ConversionHelperHidl("Stream"),
           mStream(stream),
           mHalThreadPriority(HAL_THREAD_PRIORITY_DEFAULT),
-          mCachedBufferSize(0){
+          mCachedBufferSize(0),
+          mHalThreadCpuset(HAL_THREAD_CPUSET_DEFAULT) {
 
     // Instrument audio signal power logging.
     // Note: This assumes channel mask, format, and sample rate do not change after creation.
@@ -217,6 +218,12 @@ status_t StreamHalHidl::setHalThreadPriority(int priority) {
     return OK;
 }
 
+// PICO
+status_t StreamHalHidl::setHalThreadCpuset(int group) {
+    mHalThreadCpuset = group;
+    return OK;
+}
+
 status_t StreamHalHidl::getCachedBufferSize(size_t *size) {
     if (mCachedBufferSize != 0) {
         *size = mCachedBufferSize;
@@ -235,6 +242,18 @@ bool StreamHalHidl::requestHalThreadPriority(pid_t threadPid, pid_t threadId) {
     ALOGE_IF(err, "failed to set priority %d for pid %d tid %d; error %d",
             mHalThreadPriority, threadPid, threadId, err);
     // Audio will still work, but latency will be higher and sometimes unacceptable.
+    return err == 0;
+}
+
+// PICO: as requestHalThreadPriority() for the cpuset group set by AudioFlinger. The factory
+// logs mHalThreadPriority in the error message (kept).
+bool StreamHalHidl::requestHalThreadCpuset(pid_t threadPid, pid_t threadId) {
+    if (mHalThreadCpuset == HAL_THREAD_CPUSET_DEFAULT) {
+        return true;
+    }
+    int err = requestThreadCpuset(threadPid, threadId, mHalThreadCpuset, true /*asynchronous*/);
+    ALOGE_IF(err, "failed to set cpuset %d for pid %d tid %d; error %d",
+            mHalThreadPriority, threadPid, threadId, err);
     return err == 0;
 }
 
@@ -478,6 +497,7 @@ status_t StreamOutHalHidl::prepareForWriting(size_t bufferSize) {
         return NO_INIT;
     }
     requestHalThreadPriority(halThreadPid, halThreadTid);
+    requestHalThreadCpuset(halThreadPid, halThreadTid);  // PICO
 
     mCommandMQ = std::move(tempCommandMQ);
     mDataMQ = std::move(tempDataMQ);
