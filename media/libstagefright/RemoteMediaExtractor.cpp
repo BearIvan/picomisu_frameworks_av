@@ -26,7 +26,7 @@
 #include <media/MediaSource.h>
 #include <media/stagefright/RemoteMediaExtractor.h>
 
-#include "include/PxrMediaAnalytics.h"
+#include <pxrmediametrics/PxrMediaAnalyticsItem.h>
 
 // still doing some on/off toggling here.
 #define MEDIA_LOG       1
@@ -85,34 +85,34 @@ RemoteMediaExtractor::RemoteMediaExtractor(
 
             // PICO: pxrmediametrics record of video containers
             if (mime != nullptr && !strncmp(mime, "video", 5)) {
-                mPxrAnalyticsItem = pxr::create(kKeyExtractor);
-                pxr::generateSessionID(mPxrAnalyticsItem);
-                pxr::setUid(mPxrAnalyticsItem, uid);
-                pxr::setCString(mPxrAnalyticsItem, "key_event", "media_extractor_start");
-                pxr::setCString(mPxrAnalyticsItem, "file_type", mime);
+                mPxrAnalyticsItem = pico::PxrMediaAnalyticsItem::create(kKeyExtractor);
+                mPxrAnalyticsItem->generateSessionID();
+                mPxrAnalyticsItem->setUid(uid);
+                mPxrAnalyticsItem->setCString("key_event", "media_extractor_start");
+                mPxrAnalyticsItem->setCString("file_type", mime);
 
                 int32_t videoWidth = 0;
                 if (pMetaData.findInt32(kKeyWidth, &videoWidth)) {
-                    pxr::setInt32(mPxrAnalyticsItem, "video_width", videoWidth);
+                    mPxrAnalyticsItem->setInt32("video_width", videoWidth);
                 }
                 // NB: the factory code looks the height up with kKeyWidth too
                 int32_t videoHeight = 0;
                 if (pMetaData.findInt32(kKeyWidth, &videoHeight)) {
-                    pxr::setInt32(mPxrAnalyticsItem, "video_height", videoHeight);
+                    mPxrAnalyticsItem->setInt32("video_height", videoHeight);
                 }
                 // NB: kKeyDuration is an int64 key, so this is only set when a
                 // container stores it as int32 (factory behaviour)
                 int32_t videoDuration = 0;
                 if (pMetaData.findInt32(kKeyDuration, &videoDuration)) {
-                    pxr::setInt32(mPxrAnalyticsItem, "video_duration", videoDuration);
+                    mPxrAnalyticsItem->setInt32("video_duration", videoDuration);
                 }
                 int32_t videoFps = 0;
                 if (pMetaData.findInt32(kKeyFrameRate, &videoFps)) {
-                    pxr::setInt32(mPxrAnalyticsItem, "video_fps", videoFps);
+                    mPxrAnalyticsItem->setInt32("video_fps", videoFps);
                 }
                 int32_t videoBitrate = 0;
                 if (pMetaData.findInt32(kKeyBitRate, &videoBitrate)) {
-                    pxr::setInt32(mPxrAnalyticsItem, "video_bitrate", videoBitrate);
+                    mPxrAnalyticsItem->setInt32("video_bitrate", videoBitrate);
                 }
 
                 MetaDataBase trackMeta;
@@ -130,26 +130,26 @@ RemoteMediaExtractor::RemoteMediaExtractor(
                     }
                     if (!strncmp(trackMime, "video", 5)) {
                         if (videoTrackCount == 0) {
-                            pxr::setCString(mPxrAnalyticsItem, "video_encode_type", trackMime);
+                            mPxrAnalyticsItem->setCString("video_encode_type", trackMime);
                         }
                         videoTrackCount++;
                     }
                     if (!strncmp(trackMime, "audio", 5)) {
                         if (audioTrackCount == 0) {
-                            pxr::setCString(mPxrAnalyticsItem, "audio_encode_type", trackMime);
+                            mPxrAnalyticsItem->setCString("audio_encode_type", trackMime);
                         }
                         audioTrackCount++;
                     }
                     if (!strncmp(trackMime, "subtitle", 8)) {
                         subtitleTrackCount++;
                     }
-                    pxr::setInt32(mPxrAnalyticsItem, "audio_track_count", audioTrackCount);
-                    pxr::setInt32(mPxrAnalyticsItem, "subtitle_track_count", subtitleTrackCount);
+                    mPxrAnalyticsItem->setInt32("audio_track_count", audioTrackCount);
+                    mPxrAnalyticsItem->setInt32("subtitle_track_count", subtitleTrackCount);
                 }
 
-                if (pxr::count(mPxrAnalyticsItem) > 0) {
-                    pxr::selfrecord(mPxrAnalyticsItem);
-                    pxr::destroy(mPxrAnalyticsItem);
+                if (mPxrAnalyticsItem->count() > 0) {
+                    mPxrAnalyticsItem->selfrecord();
+                    delete mPxrAnalyticsItem;
                     mPxrAnalyticsItem = nullptr;
                 }
             }

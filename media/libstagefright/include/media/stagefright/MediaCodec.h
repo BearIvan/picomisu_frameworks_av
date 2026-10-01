@@ -56,7 +56,7 @@ namespace V1_0 {
 struct IDescrambler;
 }}}}
 using hardware::cas::native::V1_0::IDescrambler;
-// PICO: factory libpxrmediametrics item, see PxrMediaAnalytics.h
+// PICO: factory libpxrmediametrics item (pxrmediametrics/PxrMediaAnalyticsItem.h)
 namespace pico {
 class PxrMediaAnalyticsItem;
 }

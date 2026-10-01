@@ -160,8 +160,6 @@ cc_library {
         "OggWriter.cpp",
         "OMXClient.cpp",
         "OmxInfoBuilder.cpp",
-        // PICO: dlopen() bridge to the factory libpxrmediametrics.so
-        "PxrMediaAnalytics.cpp",
         "RemoteMediaExtractor.cpp",
         "RemoteMediaSource.cpp",
         "SimpleDecodingSource.cpp",
@@ -193,6 +191,8 @@ cc_library {
         "libmedia_omx_client",
         "libaudioclient",
         "libmediametrics",
+        // PICO: pxrmediametrics records (factory libpxrmediametrics.so)
+        "libpxrmediametrics",
         "libmediautils",
         "libui",
         "libutils",

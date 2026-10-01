@@ -24,7 +24,7 @@
 namespace android {
 
 class MediaAnalyticsItem;
-// PICO: factory libpxrmediametrics item, see PxrMediaAnalytics.h
+// PICO: factory libpxrmediametrics item (pxrmediametrics/PxrMediaAnalyticsItem.h)
 namespace pico {
 class PxrMediaAnalyticsItem;
 }
