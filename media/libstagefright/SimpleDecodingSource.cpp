@@ -325,11 +325,16 @@ status_t SimpleDecodingSource::doRead(
                     if (!in_buf->meta_data().findInt32(kKeyValidSamples, &numPageSamples)) {
                         numPageSamples = -1;
                     }
-                    memcpy(in_buffer->base() + cpLen, &numPageSamples, sizeof(numPageSamples));
+                    if (cpLen + sizeof(numPageSamples) <= in_buffer->capacity()) {
+                        memcpy(in_buffer->base() + cpLen, &numPageSamples, sizeof(numPageSamples));
+                        cpLen += sizeof(numPageSamples);
+                    } else {
+                        ALOGW("Didn't have enough space to copy kKeyValidSamples");
+                    }
                 }
 
                 res = mCodec->queueInputBuffer(
-                        in_ix, 0 /* offset */, in_buf->range_length() + (mIsVorbis ? 4 : 0),
+                        in_ix, 0 /* offset */, cpLen,
                         timestampUs, 0 /* flags */);
                 if (res != OK) {
                     ALOGI("[%s] failed to queue input buffer #%zu", mComponentName.c_str(), in_ix);
