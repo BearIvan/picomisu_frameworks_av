@@ -354,6 +354,10 @@ status_t MediaPlayerService::AudioOutput::dump(int fd, const Vector<String16>& a
     String8 result;
 
     result.append(" AudioOutput\n");
+    // PICO: Phoenix VCMotor
+    snprintf(buffer, 255, " VCMotor params, slot (%d), reversal (%d), amp (%f)\n",
+            mVCMotorSlot, mVCMotorReversal, mVCMotorAmp);
+    result.append(buffer);
     snprintf(buffer, 255, "  stream type(%d), left - right volume(%f, %f)\n",
             mStreamType, mLeftVolume, mRightVolume);
     result.append(buffer);
@@ -1300,6 +1304,21 @@ status_t MediaPlayerService::Client::setLooping(int loop)
     return NO_ERROR;
 }
 
+// PICO: Phoenix VCMotor
+status_t MediaPlayerService::Client::setVCMotorParams(int slot, int reversal, float amp)
+{
+    sp<MediaPlayerBase> p = getPlayer();
+    {
+        Mutex::Autolock l(mLock);
+        if (p != 0 && p->hardwareOutput()) {
+            ALOGW("%s: [Phoenix_VCMotor] No need for hardware output.", __func__);
+        } else if (mAudioOutput != 0) {
+            mAudioOutput->setVCMotorParams(true, slot, reversal, amp);
+        }
+    }
+    return NO_ERROR;
+}
+
 status_t MediaPlayerService::Client::setVolume(float leftVolume, float rightVolume)
 {
     ALOGV("[%d] setVolume(%f, %f)", mConnId, leftVolume, rightVolume);
@@ -1594,6 +1613,11 @@ MediaPlayerService::AudioOutput::AudioOutput(audio_session_t sessionId, uid_t ui
       mCallbackCookie(NULL),
       mCallbackData(NULL),
       mStreamType(AUDIO_STREAM_MUSIC),
+      // PICO: Phoenix VCMotor defaults: both motors, no swap, unity gain
+      mVCMotorSlot(3),
+      mVCMotorReversal(0),
+      mVCMotorAmp(1.0f),
+      mIsVCMotorOutput(false),
       mLeftVolume(1.0),
       mRightVolume(1.0),
       mPlaybackRate(AUDIO_PLAYBACK_RATE_DEFAULT),
@@ -1624,6 +1648,13 @@ MediaPlayerService::AudioOutput::AudioOutput(audio_session_t sessionId, uid_t ui
     }
 
     setMinBufferCount();
+
+    // PICO: the output of the haptic effect session (AudioFlinger parameter
+    // "key_setHapticEffectSessionId") feeds the Phoenix VCMotors
+    String8 hapticSessionId = AudioSystem::getParameters(String8("key_getHapticEffectSessionId"));
+    if (atoi(hapticSessionId.string()) == sessionId) {
+        mIsVCMotorOutput = true;
+    }
 }
 
 MediaPlayerService::AudioOutput::~AudioOutput()
@@ -2091,6 +2122,11 @@ status_t MediaPlayerService::AudioOutput::open(
     CHECK((t != NULL) && ((mCallback == NULL) || (newcbd != NULL)));
 
     mCallbackData = newcbd;
+    // PICO: Phoenix VCMotor output: the new track feeds the motors
+    if (mIsVCMotorOutput) {
+        t->setVCMotorParams(mVCMotorSlot, mVCMotorReversal, mVCMotorAmp);
+        t->setVCMotorTrackEnabled(true);
+    }
     ALOGV("setVolume");
     t->setVolume(mLeftVolume, mRightVolume);
 
@@ -2153,6 +2189,9 @@ status_t MediaPlayerService::AudioOutput::start()
         mCallbackData->endTrackSwitch();
     }
     if (mTrack != 0) {
+        if (mIsVCMotorOutput) { // PICO: Phoenix VCMotor
+            mTrack->setVCMotorParams(mVCMotorSlot, mVCMotorReversal, mVCMotorAmp);
+        }
         mTrack->setVolume(mLeftVolume, mRightVolume);
         mTrack->setAuxEffectSendLevel(mSendLevel);
         status_t status = mTrack->start();
@@ -2162,6 +2201,26 @@ status_t MediaPlayerService::AudioOutput::start()
         return status;
     }
     return NO_INIT;
+}
+
+// PICO: Phoenix VCMotor. enabled is ignored (as in the factory): the VCMotor state of the
+// tracks only depends on the haptic effect session (mIsVCMotorOutput).
+void MediaPlayerService::AudioOutput::setVCMotorParams(bool enabled __unused, int slot,
+        int reversal, float amp)
+{
+    Mutex::Autolock lock(mLock);
+    mVCMotorSlot = slot;
+    mVCMotorReversal = reversal;
+    mVCMotorAmp = amp;
+    if (mTrack != 0) {
+        mTrack->setVCMotorParams(slot, reversal, amp);
+    }
+}
+
+// PICO: Phoenix VCMotor
+bool MediaPlayerService::AudioOutput::isVCMotorOutput() const
+{
+    return mIsVCMotorOutput;
 }
 
 void MediaPlayerService::AudioOutput::setNextOutput(const sp<AudioOutput>& nextOutput) {

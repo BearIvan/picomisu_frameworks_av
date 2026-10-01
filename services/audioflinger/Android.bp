@@ -20,6 +20,7 @@ cc_library_shared {
         "FastThread.cpp",
         "FastThreadDumpState.cpp",
         "FastThreadState.cpp",
+        "HapticEffect.cpp",
         "NBAIO_Tee.cpp",
         "PatchPanel.cpp",
         "SpdifStreamOut.cpp",

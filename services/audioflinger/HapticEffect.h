@@ -20,8 +20,27 @@
 // PICO: state of the Phoenix VCMotor (voice coil motor) haptic effects of the factory
 // PICO OS 5.13.7 AudioFlinger (HapticEffect.cpp). AudioFlinger::setParameters() and
 // getParameters() store and report the session of the haptic effect player through
-// "key_setHapticEffectSessionId" / "key_getHapticEffectSessionId".
+// "key_setHapticEffectSessionId" / "key_getHapticEffectSessionId"; the media player
+// service (MediaPlayerService::AudioOutput) reads it back to make the AudioTrack of that
+// session a VCMotor track.
+//
+// Factory layout (function-local static of getInstance(), inlined in setParameters() and
+// getParameters(), destroyed by the implicit ~HapticEffect()):
+//   0x00 int      session id (static storage, not written by the constructor)
+//   0x08 sp<>     null
+//   0x10 int      not written by the constructor
+//   0x14 status_t NO_INIT (-19)
+//   0x18 16 bytes not written by the constructor
+//   0x28 String8  empty
+// Only the session id is used in the factory libaudioflinger: no code reads or writes the
+// other fields (the library is linked with hidden visibility and section garbage
+// collection, so functions of HapticEffect.cpp that were never called are gone). They are
+// kept so that the object matches the factory one.
 
+#include <stdint.h>
+
+#include <utils/Errors.h>
+#include <utils/RefBase.h>
 #include <utils/String8.h>
 
 namespace android {
@@ -40,7 +59,14 @@ public:
 private:
     HapticEffect() = default;
 
-    int mSessionId = 0;         // 0x00
+    int mSessionId = 0;                       // 0x00
+    // Unused factory fields (see above). The type of the sp<> is unknown: a RefBase
+    // subclass whose RefBase is its primary base.
+    sp<RefBase> mUnknown08;                   // 0x08
+    int mUnknown10 __unused = 0;              // 0x10
+    status_t mUnknown14 __unused = NO_INIT;   // 0x14
+    uint8_t mUnknown18[16] __unused = {};     // 0x18
+    String8 mUnknown28;                       // 0x28
 };
 
 } // namespace android

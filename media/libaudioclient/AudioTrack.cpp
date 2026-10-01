@@ -22,10 +22,14 @@
 #include <math.h>
 #include <sys/resource.h>
 
+#include <string>
+#include <unordered_map>
+
 #include <android-base/macros.h>
 #include <audio_utils/clock.h>
 #include <audio_utils/primitives.h>
 #include <binder/IPCThreadState.h>
+#include <binder/PermissionController.h>
 #include <media/AudioTrack.h>
 #include <utils/Log.h>
 #include <private/media/AudioTrackShared.h>
@@ -49,6 +53,14 @@ namespace android {
 // ---------------------------------------------------------------------------
 
 using media::VolumeShaper;
+
+// PICO: applications whose tracks requested without any output flag are created as
+// AUDIO_OUTPUT_FLAG_FAST | AUDIO_OUTPUT_FLAG_RAW tracks (see createTrack_l()).
+static const std::unordered_map<std::string, bool> sFastTrackWhiteList = {
+    {"com.PotamWorks.SmashDrums", true},
+    {"com.KinemotikStudios.AudioTrip", true},
+    {"com.bytedance.cipher", true},
+};
 
 // TODO: Move to a separate .h
 
@@ -580,6 +592,11 @@ status_t AudioTrack::set(
     mVolume[AUDIO_INTERLEAVE_LEFT] = 1.0f;
     mVolume[AUDIO_INTERLEAVE_RIGHT] = 1.0f;
     mSendLevel = 0.0f;
+    // PICO: Phoenix VCMotor defaults: not a VCMotor track, both motors, no swap, unity gain
+    mIsVCMotorTrack = false;
+    mVCMotorSlot = 3;
+    mVCMotorReversal = 0;
+    mVCMotorAmp = 1.0f;
     // mFrameCount is initialized in createTrack_l
     mReqFrameCount = frameCount;
     if (notificationFrames >= 0) {
@@ -926,6 +943,37 @@ void AudioTrack::pause()
             ALOGV("%s(%d): for offload, cache current position %u",
                     __func__, mPortId, mPausedPosition);
         }
+    }
+}
+
+// PICO: Phoenix VCMotor
+status_t AudioTrack::setVCMotorParams(int slot, int reversal)
+{
+    return setVCMotorParams(slot, reversal, 1.0f);
+}
+
+status_t AudioTrack::setVCMotorParams(int slot, int reversal, float amp)
+{
+    ALOGD("[Phoenix_VCMotor] setVCMotorParams: slot=%d, reversal=%d, amp=%f",
+            slot, reversal, amp);
+    AutoMutex lock(mLock);
+    mIsVCMotorTrack = true;
+    mVCMotorSlot = slot;
+    mVCMotorReversal = reversal;
+    mVCMotorAmp = amp;
+    if (mAudioTrack != 0) {
+        mAudioTrack->setVCMotorParams(slot, reversal, amp);
+    }
+    return NO_ERROR;
+}
+
+void AudioTrack::setVCMotorTrackEnabled(bool enabled)
+{
+    ALOGD("[Phoenix_VCMotor] enabled=%d", enabled);
+    AutoMutex lock(mLock);
+    mIsVCMotorTrack = enabled;
+    if (mAudioTrack != 0) {
+        mAudioTrack->setVCMotorTrackEnabled(enabled);
     }
 }
 
@@ -1479,10 +1527,31 @@ status_t AudioTrack::createTrack_l()
     }
 
     {
+    // PICO: tracks of the white listed applications requested without any output flag
+    // become low latency tracks (factory 0x7afd8: the client checks of a FAST request below
+    // are skipped for them).
+    if (mFlags == AUDIO_OUTPUT_FLAG_NONE) {
+        if (mClientUid != (uid_t)-1 && mClientUid != 1000 /* AID_SYSTEM */) {
+            PermissionController permissionController;
+            Vector<String16> packages;
+            permissionController.getPackagesForUid(mClientUid, packages);
+            for (size_t i = 0; i < packages.size(); i++) {
+                if (sFastTrackWhiteList.find(std::string(String8(packages[i]).string()))
+                        != sFastTrackWhiteList.end()) {
+                    ALOGI("createTrack_l %s is white list app, change flag to fast",
+                            String8(packages[i]).string());
+                    mFlags = (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_FAST |
+                                                    AUDIO_OUTPUT_FLAG_RAW);
+                    break;
+                }
+            }
+        }
+    }
+
     // mFlags (not mOrigFlags) is modified depending on whether fast request is accepted.
     // After fast request is denied, we will request again if IAudioTrack is re-created.
     // Client can only express a preference for FAST.  Server will perform additional tests.
-    if (mFlags & AUDIO_OUTPUT_FLAG_FAST) {
+    else if (mFlags & AUDIO_OUTPUT_FLAG_FAST) {
         // either of these use cases:
         // use case 1: shared buffer
         bool sharedBuffer = mSharedBuffer != 0;
@@ -1671,6 +1740,13 @@ status_t AudioTrack::createTrack_l()
     } else {
         mStaticProxy = new StaticAudioTrackClientProxy(cblk, buffers, mFrameCount, mFrameSize);
         mProxy = mStaticProxy;
+    }
+
+    // PICO: restore the Phoenix VCMotor state on the new IAudioTrack
+    ALOGI("%s(): VCMotorTrack %d", __func__, mIsVCMotorTrack);
+    if (mIsVCMotorTrack) {
+        mAudioTrack->setVCMotorParams(mVCMotorSlot, mVCMotorReversal, mVCMotorAmp);
+        mAudioTrack->setVCMotorTrackEnabled(mIsVCMotorTrack);
     }
 
     mProxy->setVolumeLR(gain_minifloat_pack(
@@ -2995,6 +3071,10 @@ status_t AudioTrack::dump(int fd, const Vector<String16>& args __unused) const
     result.append(" AudioTrack::dump\n");
     result.appendFormat("  id(%d) status(%d), state(%d), session Id(%d), flags(%#x)\n",
                         mPortId, mStatus, mState, mSessionId, mFlags);
+    // PICO: Phoenix VCMotor
+    result.appendFormat("  vcMotorSlot(%d) vcMotorReversal(%d), vcMotorAmp(%f),"
+                        "isVCMotorPlayer(%d)\n",
+                        mVCMotorSlot, mVCMotorReversal, mVCMotorAmp, mIsVCMotorTrack);
     result.appendFormat("  stream type(%d), left - right volume(%f, %f)\n",
                         (mStreamType == AUDIO_STREAM_DEFAULT) ?
                             AudioSystem::attributesToStreamType(mAttributes) :
@@ -3098,6 +3178,11 @@ void AudioTrack::onAudioDeviceUpdate(audio_io_handle_t audioIo,
     if (callback.get() != nullptr) {
         callback->onAudioDeviceUpdate(mOutput, mRoutedDeviceId);
     }
+}
+
+// PICO: ISoundCallback, empty in the factory AudioTrack (which never registers itself)
+void AudioTrack::onSoundCallback(bool mute __unused, bool registered __unused)
+{
 }
 
 status_t AudioTrack::pendingDuration(int32_t *msec, ExtendedTimestamp::Location location)

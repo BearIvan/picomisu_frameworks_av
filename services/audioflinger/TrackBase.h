@@ -317,6 +317,12 @@ protected:
     std::atomic<FrameTime> mKernelFrameTime{};     // last frame time on kernel side.
     const pid_t         mCreatorPid;  // can be different from mclient->pid() for instance
                                       // when created by NuPlayer on behalf of a client
+
+    // PICO: [Phoenix_VCMotor_Audio] voice activity of playback tracks (Track::vadProcess())
+    bool                mVadLogPending = true; // factory 0x204: log the next detected activity,
+                                               // set again by Track::start()
+    bool                mOutVad = false;       // factory 0x205: the last non empty buffer
+                                               // obtained was not silent
 };
 
 // PatchProxyBufferProvider interface is implemented by PatchTrack and PatchRecord.

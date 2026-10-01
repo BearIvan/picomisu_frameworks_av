@@ -61,6 +61,7 @@ enum {
     NOTIFY_AT,
     SET_AUDIO_STREAM_TYPE,
     SET_LOOPING,
+    SET_VCMOTOR_PARAMS, // PICO: Phoenix VCMotor, shifts the next codes as in the factory
     SET_VOLUME,
     INVOKE,
     SET_METADATA_FILTER,
@@ -359,6 +360,18 @@ public:
         data.writeInterfaceToken(IMediaPlayer::getInterfaceDescriptor());
         data.writeInt32(loop);
         remote()->transact(SET_LOOPING, data, &reply);
+        return reply.readInt32();
+    }
+
+    // PICO: Phoenix VCMotor
+    status_t setVCMotorParams(int slot, int reversal, float amp)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IMediaPlayer::getInterfaceDescriptor());
+        data.writeInt32(slot);
+        data.writeInt32(reversal);
+        data.writeFloat(amp);
+        remote()->transact(SET_VCMOTOR_PARAMS, data, &reply);
         return reply.readInt32();
     }
 
@@ -830,6 +843,15 @@ status_t BnMediaPlayer::onTransact(
         case SET_LOOPING: {
             CHECK_INTERFACE(IMediaPlayer, data, reply);
             reply->writeInt32(setLooping(data.readInt32()));
+            return NO_ERROR;
+        } break;
+        // PICO: Phoenix VCMotor
+        case SET_VCMOTOR_PARAMS: {
+            CHECK_INTERFACE(IMediaPlayer, data, reply);
+            const int slot = data.readInt32();
+            const int reversal = data.readInt32();
+            const float amp = data.readFloat();
+            reply->writeInt32(setVCMotorParams(slot, reversal, amp));
             return NO_ERROR;
         } break;
         case SET_VOLUME: {

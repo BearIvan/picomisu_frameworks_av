@@ -247,6 +247,11 @@ public:
             status_t        getAudioStreamType(audio_stream_type_t *type);
             status_t        setLooping(int loop);
             bool            isLooping();
+            // PICO: Phoenix VCMotor haptics driven by the audio of the player: slot 0 none,
+            // 1 left channel, 2 right channel, 3 both; reversal 1 swaps the channels; amp
+            // scales the samples (1.0f for the two argument version).
+            status_t        setVCMotorParams(int slot, int reversal);
+            status_t        setVCMotorParams(int slot, int reversal, float amp);
             status_t        setVolume(float leftVolume, float rightVolume);
     virtual void            notify(int msg, int ext1, int ext2, const Parcel *obj = NULL);
             status_t        invoke(const Parcel& request, Parcel *reply);
@@ -300,6 +305,11 @@ private:
     audio_stream_type_t         mStreamType;
     Parcel*                     mAudioAttributesParcel;
     bool                        mLoop;
+    // PICO: Phoenix VCMotor parameters, sent again to the player by start()
+    int                         mVCMotorSlot;
+    int                         mVCMotorReversal;
+    float                       mVCMotorAmp;
+    bool                        mIsVCMotorPlayer;
     float                       mLeftVolume;
     float                       mRightVolume;
     int                         mVideoWidth;

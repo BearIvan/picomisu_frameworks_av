@@ -1107,8 +1107,74 @@ bool NuPlayer::Renderer::onDrainAudioQueue() {
 
         size_t copy = entry->mBuffer->size() - entry->mOffset;
 
-        ssize_t written = mAudioSink->write(entry->mBuffer->data() + entry->mOffset,
-                                            copy, false /* blocking */);
+        ssize_t written;
+        // PICO: ratio between the bytes written to the sink and the bytes of the buffer
+        int multiple;
+        if (mAudioSink->isVCMotorOutput()
+                && (mCurrentPcmInfo.mNumChannels == 1
+                        || mCurrentPcmInfo.mChannelMask == AUDIO_CHANNEL_OUT_MONO)) {
+            // PICO: the Phoenix VCMotor sink was opened in stereo (see onOpenAudioSink()):
+            // duplicate the mono samples to both channels
+            uint8_t* stereo = new uint8_t[copy * 2];
+            uint8_t* mono = new uint8_t[copy];
+            memset(stereo, 0, copy * 2);
+            memset(mono, 0, copy);
+            memcpy(mono, entry->mBuffer->data() + entry->mOffset, copy);
+            switch (mCurrentPcmInfo.mFormat) {
+            case AUDIO_FORMAT_PCM_32_BIT:
+            case AUDIO_FORMAT_PCM_FLOAT:
+                for (uint32_t i = 0; i < copy; i += 4) {
+                    const uint32_t j = i * 2;
+                    stereo[j] = mono[i];
+                    stereo[j + 1] = mono[i + 1];
+                    stereo[j + 2] = mono[i + 2];
+                    stereo[j + 3] = mono[i + 3];
+                    stereo[j + 4] = mono[i];
+                    stereo[j + 5] = mono[i + 1];
+                    stereo[j + 6] = mono[i + 2];
+                    stereo[j + 7] = mono[i + 3];
+                }
+                break;
+            case AUDIO_FORMAT_PCM_16_BIT:
+                for (uint32_t i = 0; i < copy; i += 2) {
+                    const uint32_t j = i * 2;
+                    stereo[j] = mono[i];
+                    stereo[j + 1] = mono[i + 1];
+                    stereo[j + 2] = mono[i];
+                    stereo[j + 3] = mono[i + 1];
+                }
+                break;
+            case AUDIO_FORMAT_PCM_8_BIT:
+                for (uint32_t i = 0; i < copy; i++) {
+                    stereo[i * 2] = mono[i];
+                    stereo[i * 2 + 1] = mono[i];
+                }
+                break;
+            case AUDIO_FORMAT_PCM_24_BIT_PACKED:
+                for (uint32_t i = 0; i < copy; i += 3) {
+                    const uint32_t j = i * 2;
+                    stereo[j] = mono[i];
+                    stereo[j + 1] = mono[i + 1];
+                    stereo[j + 2] = mono[i + 2];
+                    stereo[j + 3] = mono[i];
+                    stereo[j + 4] = mono[i + 1];
+                    stereo[j + 5] = mono[i + 2];
+                }
+                break;
+            default:
+                ALOGE("%s: [Phoenix_VCMotor] unsupport this format(%d)", __func__,
+                        mCurrentPcmInfo.mFormat);
+                break;
+            }
+            written = mAudioSink->write(stereo, copy * 2, false /* blocking */);
+            delete[] stereo;
+            delete[] mono;
+            multiple = 2;
+        } else {
+            written = mAudioSink->write(entry->mBuffer->data() + entry->mOffset,
+                                        copy, false /* blocking */);
+            multiple = 1;
+        }
         if (written < 0) {
             // An error in AudioSink write. Perhaps the AudioSink was not properly opened.
             if (written == WOULD_BLOCK) {
@@ -1122,9 +1188,9 @@ bool NuPlayer::Renderer::onDrainAudioQueue() {
             break;
         }
 
-        entry->mOffset += written;
+        entry->mOffset += written / multiple;
         size_t remainder = entry->mBuffer->size() - entry->mOffset;
-        if ((ssize_t)remainder < mAudioSink->frameSize()) {
+        if ((ssize_t)(remainder * multiple) < mAudioSink->frameSize()) {
             if (remainder > 0) {
                 ALOGW("Corrupted audio buffer has fractional frames, discarding %zu bytes.",
                         remainder);
@@ -1153,7 +1219,7 @@ bool NuPlayer::Renderer::onDrainAudioQueue() {
             notifyIfMediaRenderingStarted_l();
         }
 
-        if (written != (ssize_t)copy) {
+        if (written / multiple != (ssize_t)copy) {
             // A short count was received from AudioSink::write()
             //
             // AudioSink write is called in non-blocking mode.
@@ -1168,7 +1234,7 @@ bool NuPlayer::Renderer::onDrainAudioQueue() {
             // (Case 1)
             // Must be a multiple of the frame size.  If it is not a multiple of a frame size, it
             // needs to fail, as we should not carry over fractional frames between calls.
-            CHECK_EQ(copy % mAudioSink->frameSize(), 0u);
+            CHECK_EQ( copy % (mAudioSink->frameSize() / multiple),0u);
 
             // (Case 2, 3, 4)
             // Return early to the caller.
@@ -2169,6 +2235,30 @@ status_t NuPlayer::Renderer::onOpenAudioSink(
         // We should always be able to set our playback settings if the sink is closed.
         LOG_ALWAYS_FATAL_IF(mAudioSink->setPlaybackRate(mPlaybackSettings) != OK,
                 "onOpenAudioSink: can't set playback rate on closed sink");
+        // PICO: the Phoenix VCMotor tracks are stereo low latency tracks: mono PCM is
+        // up-mixed by onDrainAudioQueue() (mCurrentPcmInfo keeps the mono configuration).
+        if (mAudioSink->isVCMotorOutput()) {
+            bool vcMotorOutput = true;
+            if (numChannels == 1) {
+                switch (audioFormat) {
+                case AUDIO_FORMAT_PCM_16_BIT:
+                case AUDIO_FORMAT_PCM_8_BIT:
+                case AUDIO_FORMAT_PCM_32_BIT:
+                case AUDIO_FORMAT_PCM_FLOAT:
+                case AUDIO_FORMAT_PCM_24_BIT_PACKED:
+                    ALOGD("[Phoenix_VCMotor] openAudioSink: Force change to stereo for haptic");
+                    numChannels = 2;
+                    channelMask = AUDIO_CHANNEL_OUT_STEREO;
+                    break;
+                default:
+                    vcMotorOutput = false;
+                    break;
+                }
+            }
+            if (vcMotorOutput) {
+                pcmFlags = AUDIO_OUTPUT_FLAG_FAST | AUDIO_OUTPUT_FLAG_RAW;
+            }
+        }
         status_t err = mAudioSink->open(
                     sampleRate,
                     numChannels,

@@ -17,6 +17,7 @@
 #ifndef ANDROID_AUDIOTRACK_H
 #define ANDROID_AUDIOTRACK_H
 
+#include <binder/SoundSettings.h>
 #include <cutils/sched_policy.h>
 #include <media/AudioSystem.h>
 #include <media/AudioTimestamp.h>
@@ -36,7 +37,8 @@ class StaticAudioTrackClientProxy;
 
 // ----------------------------------------------------------------------------
 
-class AudioTrack : public AudioSystem::AudioDeviceCallback
+// PICO: the factory AudioTrack is also a (never registered) SoundSettings mute listener.
+class AudioTrack : public AudioSystem::AudioDeviceCallback, public ISoundCallback
 {
 public:
 
@@ -932,6 +934,19 @@ public:
      */
             audio_port_handle_t getPortId() const { return mPortId; };
 
+    // PICO: Phoenix VCMotor (voice coil motor) haptics driven by the PCM of this track.
+    /* Marks the track as a VCMotor track and selects the motor(s) it feeds: slot 0 none,
+     * 1 left channel, 2 right channel, 3 both; reversal 1 swaps the channels; amp scales the
+     * samples (1.0f for the two argument version). The parameters are sent again to
+     * AudioFlinger each time the IAudioTrack is created. Always returns NO_ERROR.
+     */
+            status_t    setVCMotorParams(int slot, int reversal);
+            status_t    setVCMotorParams(int slot, int reversal, float amp);
+            void        setVCMotorTrackEnabled(bool enabled);
+
+    // PICO: ISoundCallback (SoundSettings prefetch mute state), ignored by AudioTrack.
+    virtual void        onSoundCallback(bool mute, bool registered);
+
  protected:
     /* copying audio tracks is not allowed */
                         AudioTrack(const AudioTrack& other);
@@ -1220,6 +1235,16 @@ public:
     sp<media::VolumeHandler>       mVolumeHandler;
 
     int64_t                mPauseTimeRealUs;
+
+    // PICO: Phoenix VCMotor parameters, protected by mLock (factory offsets 0x3c0..0x3d4)
+    int                     mVCMotorSlot = 3;       // motors fed by the track, see setVCMotorParams()
+    int                     mVCMotorReversal = 0;   // 1: swap the channels
+    float                   mVCMotorAmp = 1.0f;     // sample gain
+    bool                    mIsVCMotorTrack = false; // "isVCMotorPlayer" in dump()
+    // Only initialised by the factory constructors (-1 / false) and never read in
+    // libaudioclient; kept so that sizeof(AudioTrack) matches the factory (0x410).
+    int                     mVCMotorReserved = -1;
+    bool                    mVCMotorReservedFlag = false;
 
 private:
     class DeathNotifier : public IBinder::DeathRecipient {

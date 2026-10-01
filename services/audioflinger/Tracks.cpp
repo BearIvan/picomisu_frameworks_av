@@ -20,14 +20,20 @@
 //#define LOG_NDEBUG 0
 
 #include "Configuration.h"
+#include <errno.h>
 #include <linux/futex.h>
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/syscall.h>
+#include <time.h>
+#include <cutils/properties.h>
 #include <utils/Log.h>
 
 #include <private/media/AudioTrackShared.h>
 
 #include "AudioFlinger.h"
+#include "AudioDumpUtils.h"
 
 #include <media/nbaio/Pipe.h>
 #include <media/nbaio/PipeReader.h>
@@ -374,6 +380,17 @@ void AudioFlinger::TrackHandle::signal()
     return mTrack->signal();
 }
 
+// PICO: Phoenix VCMotor
+status_t AudioFlinger::TrackHandle::setVCMotorParams(int slot, int reversal, float amp)
+{
+    return mTrack->setVCMotorParams(slot, reversal, amp);
+}
+
+void AudioFlinger::TrackHandle::setVCMotorTrackEnabled(bool enabled)
+{
+    mTrack->setVCMotorTrackEnabled(enabled);
+}
+
 status_t AudioFlinger::TrackHandle::onTransact(
     uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)
 {
@@ -593,6 +610,17 @@ AudioFlinger::PlaybackThread::Track::Track(
         mExternalVibration = new os::ExternalVibration(
                 mUid, "" /* pkg */, mAttr, mAudioVibrationController);
     }
+
+    // PICO: audio.raw.dump=track dumps the PCM obtained by getNextBuffer() before and after
+    // the Phoenix VCMotor processing.
+    char value[PROPERTY_VALUE_MAX];
+    property_get("audio.raw.dump", value, nullptr);
+    if (strncmp("track", value, 5) == 0) {
+        const time_t now = time(nullptr);
+        const struct tm* localTime = localtime(&now);
+        mRawDumpFile = openRawDumpFile(localTime, false /* before */);
+        mRawDumpFileBefore = openRawDumpFile(localTime, true /* before */);
+    }
 }
 
 AudioFlinger::PlaybackThread::Track::~Track()
@@ -606,6 +634,63 @@ AudioFlinger::PlaybackThread::Track::~Track()
     if (mSharedBuffer != 0) {
         mSharedBuffer.clear();
     }
+
+    // PICO: audio.raw.dump=track
+    if (mRawDumpFile != nullptr) {
+        fclose(mRawDumpFile);
+        mRawDumpFile = nullptr;
+        ALOGD("close audio raw dump file");
+    }
+    if (mRawDumpFileBefore != nullptr) {
+        fclose(mRawDumpFileBefore);
+        mRawDumpFileBefore = nullptr;
+        ALOGD("close audio raw dump file");
+    }
+}
+
+// PICO: opens a raw dump file of audio.raw.dump=track
+FILE* AudioFlinger::PlaybackThread::Track::openRawDumpFile(const struct tm* localTime, bool before)
+{
+    char path[128];
+    const int n = sprintf(path, before
+            ? "/data/misc/audioserver/%d%02d%02d%02d%02d%02d_p%d_s%d_f%x_c%x_before.raw"
+            : "/data/misc/audioserver/%d%02d%02d%02d%02d%02d_p%d_s%d_f%x_c%x.raw",
+            localTime->tm_year + 1900, localTime->tm_mon + 1, localTime->tm_mday,
+            localTime->tm_hour, localTime->tm_min, localTime->tm_sec,
+            (mClient == 0) ? getpid() : mClient->pid(), mSampleRate, mFormat, mChannelMask);
+    path[n] = '\0';
+    FILE* file = fopen(path, "w+b");
+    if (file != nullptr) {
+        ALOGD("[Phoenix_VCMotor] open audio raw dump file %s", path);
+    } else {
+        const int err = errno;
+        ALOGE("[Phoenix_VCMotor] can't open audio raw dump file %s, errno %d:%s",
+                path, err, strerror(err));
+    }
+    return file;
+}
+
+// PICO: appends the obtained buffer to a raw dump file of audio.raw.dump=track
+void AudioFlinger::PlaybackThread::Track::writeRawDumpFile(FILE* file,
+        const AudioBufferProvider::Buffer& buffer)
+{
+    if (file == nullptr || buffer.raw == nullptr) {
+        return;
+    }
+    const size_t written = fwrite(buffer.raw, mFrameSize, buffer.frameCount, file);
+    if (written != buffer.frameCount) {
+        ALOGW("Track want write %zd,  really written %zd", buffer.frameCount, written);
+    }
+}
+
+// PICO: Phoenix VCMotor, called through TrackHandle
+status_t AudioFlinger::PlaybackThread::Track::setVCMotorParams(int slot, int reversal, float amp)
+{
+    ALOGD("%s: [Phoenix_VCMotor] slot=%d, reversal=%d, amp=%f", __func__, slot, reversal, amp);
+    mVCMotorSlot = slot;
+    mVCMotorReversal = reversal;
+    mVCMotorAmp = amp;
+    return NO_ERROR;
 }
 
 status_t AudioFlinger::PlaybackThread::Track::initCheck() const
@@ -794,6 +879,27 @@ status_t AudioFlinger::PlaybackThread::Track::getNextBuffer(AudioBufferProvider:
     status_t status = mServerProxy->obtainBuffer(&buf);
     buffer->frameCount = buf.mFrameCount;
     buffer->raw = buf.mRaw;
+
+    // PICO: pico.audio.dump.af_track_pcm dump of the obtained PCM
+    if (audioDataDump::isDumpEnabled("pico.audio.dump.af_track_pcm")) {
+        char path[128];
+        const int n = sprintf(path, "%s%s-sessionId%d-portId%d-s%d_f%x_c%x.raw",
+                audioDataDump::kAudioDumpDir, "af_dump_track_pcm", mSessionId, mPortId,
+                mSampleRate, mFormat, mChannelMask);
+        path[n] = '\0';
+        audioDataDump::dumpAudioPcm(path, (char *)buffer->raw, mFrameSize * buffer->frameCount);
+    }
+
+    // PICO: Phoenix VCMotor
+    if (buf.mRaw != nullptr && buf.mFrameCount != 0) {
+        vadProcess(buf.mRaw, buf.mFrameCount * mFrameSize);
+    }
+    writeRawDumpFile(mRawDumpFileBefore, *buffer);
+    if (mVCMotorTrackEnabled) {
+        preprocessVibrationData(buffer->raw, buf.mFrameCount);
+    }
+    writeRawDumpFile(mRawDumpFile, *buffer);
+
     if (buf.mFrameCount == 0 && !isStopping() && !isStopped() && !isPaused()) {
         ALOGV("%s(%d): underrun,  framesReady(%zu) < framesDesired(%zd), state: %d",
                 __func__, mId, buf.mFrameCount, desiredFrames, mState);
@@ -802,6 +908,207 @@ status_t AudioFlinger::PlaybackThread::Track::getNextBuffer(AudioBufferProvider:
         mAudioTrackServerProxy->tallyUnderrunFrames(0);
     }
     return status;
+}
+
+// PICO: [Phoenix_VCMotor_Audio] voice activity detection: the buffer is active when any of its
+// bytes is not zero. The first activity after start() is logged.
+void AudioFlinger::PlaybackThread::Track::vadProcess(const void* buffer, size_t size)
+{
+    const uint8_t* const data = static_cast<const uint8_t*>(buffer);
+    bool outVad = false;
+    for (uint32_t i = 0; i < size; i++) {
+        if (data[i] != 0) {
+            outVad = true;
+            break;
+        }
+    }
+    if (outVad && mVadLogPending) {
+        ALOGD("%s: [Phoenix_VCMotor_Audio] outVad=%d, mPortId=%d, isHapticTrack=%d",
+                __func__, outVad, mPortId, mVCMotorTrackEnabled);
+        mVadLogPending = false;
+    }
+    mOutVad = outVad;
+}
+
+// PICO: [Phoenix_VCMotor] turns the stereo PCM obtained by getNextBuffer() into the data of the
+// Phoenix voice coil motors, in place: the left channel drives motor slot 1 and the right
+// channel motor slot 2.
+// - mVCMotorSlot 0 silences the buffer; 1 (resp. 2) silences the right (resp. left) channel;
+// - mVCMotorReversal 1 swaps the two channels first;
+// - then 16 bit and float samples are scaled by mVCMotorAmp and clamped.
+// The channels are split byte by byte (8, 16, 24 packed, 32 bit and float PCM).
+void AudioFlinger::PlaybackThread::Track::preprocessVibrationData(void* buffer, size_t frameCount)
+{
+    if (mVadLogPending && mOutVad) {
+        ALOGD("%s: [Phoenix_VCMotor] channelMask=%X, format=%X, sample=%u, frameCount=%zu, "
+                "frameSize=%zu", __func__, mChannelMask, mFormat, sampleRate(), frameCount,
+                mFrameSize);
+    }
+    if (buffer == nullptr || frameCount == 0) {
+        return;
+    }
+    if (mChannelMask != AUDIO_CHANNEL_OUT_STEREO) {
+        ALOGE("%s: [Phoenix_VCMotor] invalid formate. Not stereo PCM.", __func__);
+        return;
+    }
+    uint8_t* const data = static_cast<uint8_t*>(buffer);
+
+    if (mVCMotorSlot == 0) {
+        memset(data, 0, frameCount * mFrameSize);
+        return;
+    }
+
+    if (mVCMotorSlot != 3 || mVCMotorReversal != 0) {
+        const size_t half = (frameCount * mFrameSize) >> 1; // bytes per channel
+        uint8_t* const left = new uint8_t[half];
+        uint8_t* const right = new uint8_t[half];
+        uint8_t* const temp = new uint8_t[half];
+        memset(left, 0, half);
+        memset(right, 0, half);
+        memset(temp, 0, half);
+
+        // split the channels
+        switch (mFormat) {
+        case AUDIO_FORMAT_PCM_32_BIT:
+        case AUDIO_FORMAT_PCM_FLOAT:
+            for (uint32_t i = 0; i < half; i += 4) {
+                const uint32_t j = i * 2;
+                left[i] = data[j];
+                left[i + 1] = data[j + 1];
+                left[i + 2] = data[j + 2];
+                left[i + 3] = data[j + 3];
+                right[i] = data[j + 4];
+                right[i + 1] = data[j + 5];
+                right[i + 2] = data[j + 6];
+                right[i + 3] = data[j + 7];
+            }
+            break;
+        case AUDIO_FORMAT_PCM_16_BIT:
+            for (uint32_t i = 0; i < half; i += 2) {
+                const uint32_t j = i * 2;
+                left[i] = data[j];
+                left[i + 1] = data[j + 1];
+                right[i] = data[j + 2];
+                right[i + 1] = data[j + 3];
+            }
+            break;
+        case AUDIO_FORMAT_PCM_8_BIT:
+            for (uint32_t i = 0; i < half; i++) {
+                const uint32_t j = i * 2;
+                left[i] = data[j];
+                right[i] = data[j + 1];
+            }
+            break;
+        case AUDIO_FORMAT_PCM_24_BIT_PACKED:
+            for (uint32_t i = 0; i < half; i += 3) {
+                const uint32_t j = i * 2;
+                left[i] = data[j];
+                left[i + 1] = data[j + 1];
+                left[i + 2] = data[j + 2];
+                right[i] = data[j + 3];
+                right[i + 1] = data[j + 4];
+                right[i + 2] = data[j + 5];
+            }
+            break;
+        default:
+            ALOGE("%s: [Phoenix_VCMotor] unsupport this format(%d)", __func__, mFormat);
+            break;
+        }
+
+        if (mVCMotorReversal == 1) {
+            memcpy(temp, left, half);
+            memcpy(left, right, half);
+            memcpy(right, temp, half);
+        }
+        if (mVCMotorSlot == 2) {
+            memset(left, 0, half);
+        } else if (mVCMotorSlot == 1) {
+            memset(right, 0, half);
+        }
+
+        // interleave the channels again
+        switch (mFormat) {
+        case AUDIO_FORMAT_PCM_32_BIT:
+        case AUDIO_FORMAT_PCM_FLOAT:
+            for (uint32_t i = 0; i < half; i += 4) {
+                const uint32_t j = i * 2;
+                data[j] = left[i];
+                data[j + 1] = left[i + 1];
+                data[j + 2] = left[i + 2];
+                data[j + 3] = left[i + 3];
+                data[j + 4] = right[i];
+                data[j + 5] = right[i + 1];
+                data[j + 6] = right[i + 2];
+                data[j + 7] = right[i + 3];
+            }
+            break;
+        case AUDIO_FORMAT_PCM_16_BIT:
+            for (uint32_t i = 0; i < half; i += 2) {
+                const uint32_t j = i * 2;
+                data[j] = left[i];
+                data[j + 1] = left[i + 1];
+                data[j + 2] = right[i];
+                data[j + 3] = right[i + 1];
+            }
+            break;
+        case AUDIO_FORMAT_PCM_8_BIT:
+            for (uint32_t i = 0; i < half; i++) {
+                const uint32_t j = i * 2;
+                data[j] = left[i];
+                data[j + 1] = right[i];
+            }
+            break;
+        case AUDIO_FORMAT_PCM_24_BIT_PACKED:
+            for (uint32_t i = 0; i < half; i += 3) {
+                const uint32_t j = i * 2;
+                data[j] = left[i];
+                data[j + 1] = left[i + 1];
+                data[j + 2] = left[i + 2];
+                data[j + 3] = right[i];
+                data[j + 4] = right[i + 1];
+                data[j + 5] = right[i + 2];
+            }
+            break;
+        default:
+            ALOGE("%s: [Phoenix_VCMotor] unsupport this format(%d)", __func__, mFormat);
+            memset(data, 0, frameCount * mFrameSize);
+            break;
+        }
+
+        delete[] left;
+        delete[] right;
+        delete[] temp;
+    }
+
+    if (mVCMotorAmp == 1.0f) {
+        return;
+    }
+    const size_t sampleCount = frameCount * 2; // stereo
+    if (mFormat == AUDIO_FORMAT_PCM_FLOAT) {
+        float* const samples = new float[sampleCount];
+        memcpy(samples, data, frameCount * mFrameSize);
+        for (uint32_t i = 0; i < sampleCount; i++) {
+            samples[i] = samples[i] * mVCMotorAmp;
+            if (samples[i] > 1.0f) {
+                samples[i] = 1.0f;
+            } else if (samples[i] < -1.0f) {
+                samples[i] = -1.0f;
+            }
+        }
+        memcpy(data, samples, frameCount * mFrameSize);
+        delete[] samples;
+    } else if (mFormat == AUDIO_FORMAT_PCM_16_BIT) {
+        int16_t* const samples = new int16_t[sampleCount];
+        memcpy(samples, data, frameCount * mFrameSize);
+        for (uint32_t i = 0; i < sampleCount; i++) {
+            int32_t sample = (int32_t)(mVCMotorAmp * samples[i]);
+            sample = sample > INT16_MIN ? sample : INT16_MIN;
+            sample = sample < INT16_MAX ? sample : INT16_MAX;
+            samples[i] = (int16_t)sample;
+        }
+        memcpy(data, samples, frameCount * mFrameSize);
+        delete[] samples;
+    }
 }
 
 void AudioFlinger::PlaybackThread::Track::releaseBuffer(AudioBufferProvider::Buffer* buffer)
@@ -820,6 +1127,8 @@ void AudioFlinger::PlaybackThread::Track::interceptBuffer(
         // Additionally PatchProxyBufferProvider::obtainBuffer (called by PathTrack::getNextBuffer)
         // does not allow 0 frame size request contrary to getNextBuffer
     }
+    { // PICO: scope for mTeePatchesLock
+    Mutex::Autolock _l(mTeePatchesLock);
     for (auto& teePatch : mTeePatches) {
         RecordThread::PatchRecord* patchRecord = teePatch.patchRecord.get();
 
@@ -835,6 +1144,7 @@ void AudioFlinger::PlaybackThread::Track::interceptBuffer(
         ALOGW_IF(framesLeft != 0, "%s(%d) PatchRecord %d can not provide big enough "
                  "buffer %zu/%zu, dropping %zu frames", __func__, mId, patchRecord->mId,
                  framesWritten, frameCount, framesLeft);
+    }
     }
     auto spent = ceil<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
     using namespace std::chrono_literals;
@@ -1015,6 +1325,8 @@ status_t AudioFlinger::PlaybackThread::Track::start(AudioSystem::sync_event_t ev
     if (status == NO_ERROR) {
         forEachTeePatchTrack([](auto patchTrack) { patchTrack->start(); });
     }
+    // PICO: [Phoenix_VCMotor_Audio] log the next voice activity of the track
+    mVadLogPending = true;
     return status;
 }
 
@@ -1266,6 +1578,7 @@ void AudioFlinger::PlaybackThread::Track::copyMetadataTo(MetadataInserter& backI
 
 void AudioFlinger::PlaybackThread::Track::setTeePatches(TeePatches teePatches) {
     forEachTeePatchTrack([](auto patchTrack) { patchTrack->destroy(); });
+    Mutex::Autolock _l(mTeePatchesLock); // PICO: interceptBuffer() runs on the mixer thread
     mTeePatches = std::move(teePatches);
 }
 

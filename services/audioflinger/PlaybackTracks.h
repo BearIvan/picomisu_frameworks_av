@@ -171,6 +171,16 @@ public:
 
             void    setTeePatches(TeePatches teePatches);
 
+            // PICO: Phoenix VCMotor (voice coil motor) haptics driven by the track PCM,
+            // set through IAudioTrack (TrackHandle).
+            /** Selects the motor(s) fed by the track: slot 0 none, 1 left channel,
+             *  2 right channel, 3 both; reversal 1 swaps the channels; amp scales the samples. */
+            status_t setVCMotorParams(int slot, int reversal, float amp);
+            /** When enabled, getNextBuffer() turns the track PCM into vibration data. */
+            void    setVCMotorTrackEnabled(bool enabled) { mVCMotorTrackEnabled = enabled; }
+            /** A VCMotor track is mixed at full volume even when its stream is muted. */
+            bool    isVCMotorTrackEnabled() const { return mVCMotorTrackEnabled; }
+
 protected:
     // for numerous
     friend class PlaybackThread;
@@ -273,6 +283,15 @@ private:
     void                interceptBuffer(const AudioBufferProvider::Buffer& buffer);
     /** Write the source data in the buffer provider. @return written frame count. */
     size_t              writeFrames(AudioBufferProvider* dest, const void* src, size_t frameCount);
+    // PICO: [Phoenix_VCMotor_Audio] voice activity detection of the obtained buffer
+    void                vadProcess(const void* buffer, size_t size);
+    // PICO: [Phoenix_VCMotor] turns the stereo PCM of the obtained buffer into vibration data
+    void                preprocessVibrationData(void* buffer, size_t frameCount);
+    // PICO: audio.raw.dump=track, opens the raw dump file
+    // /data/misc/audioserver/<local time>_p<pid>_s<rate>_f<format>_c<mask>[_before].raw
+    FILE*               openRawDumpFile(const struct tm* localTime, bool before);
+    // PICO: appends the obtained buffer to a raw dump file
+    void                writeRawDumpFile(FILE* file, const AudioBufferProvider::Buffer& buffer);
     template <class F>
     void                forEachTeePatchTrack(F f) {
         for (auto& tp : mTeePatches) { f(tp.patchTrack); }
@@ -298,6 +317,18 @@ private:
     // If the last track change was notified to the client with readAndClearHasChanged
     std::atomic_flag     mChangeNotified = ATOMIC_FLAG_INIT;
     TeePatches  mTeePatches;
+
+    // PICO: factory Track fields (factory offsets for reference; the factory Track also has
+    // a float at 0x350 (playback speed, Android 11 secondary outputs), not ported, and the
+    // spatialization flags at 0x37c/0x37d).
+    Mutex               mTeePatchesLock;        // 0x354: mTeePatches in interceptBuffer()
+                                                // and setTeePatches()
+    bool                mVCMotorTrackEnabled = false; // 0x37e: see setVCMotorTrackEnabled()
+    int                 mVCMotorSlot = 3;       // 0x380: both motors
+    int                 mVCMotorReversal = 0;   // 0x384: no channel swap
+    float               mVCMotorAmp = 1.0f;     // 0x388: unity gain
+    FILE*               mRawDumpFile = nullptr;       // 0x390: after the VCMotor processing
+    FILE*               mRawDumpFileBefore = nullptr; // 0x398: before the VCMotor processing
 };  // end of Track
 
 

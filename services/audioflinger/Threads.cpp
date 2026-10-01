@@ -4829,6 +4829,11 @@ AudioFlinger::PlaybackThread::mixer_state AudioFlinger::MixerThread::prepareTrac
                 } else {
                     volume = masterVolume * mStreamTypes[track->streamType()].volume;
                 }
+                // PICO: the Phoenix VCMotor tracks drive the motors at full scale, whatever the
+                // master and stream volume or mute
+                if (track->isVCMotorTrackEnabled()) {
+                    volume = 1.0f;
+                }
 
                 handleVoipVolume_l(&volume);
 

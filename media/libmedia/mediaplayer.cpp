@@ -65,6 +65,11 @@ MediaPlayer::MediaPlayer()
     mPrepareSync = false;
     mPrepareStatus = NO_ERROR;
     mLoop = false;
+    // PICO: Phoenix VCMotor defaults: not a VCMotor player, both motors, no swap, unity gain
+    mVCMotorSlot = 3;
+    mVCMotorReversal = 0;
+    mVCMotorAmp = 1.0f;
+    mIsVCMotorPlayer = false;
     mLeftVolume = mRightVolume = 1.0;
     mVideoWidth = mVideoHeight = 0;
     mLockThreadId = 0;
@@ -335,6 +340,9 @@ status_t MediaPlayer::start()
     } else if ( (mPlayer != 0) && ( mCurrentState & ( MEDIA_PLAYER_PREPARED |
                     MEDIA_PLAYER_PLAYBACK_COMPLETE | MEDIA_PLAYER_PAUSED ) ) ) {
         mPlayer->setLooping(mLoop);
+        if (mIsVCMotorPlayer) { // PICO: Phoenix VCMotor
+            mPlayer->setVCMotorParams(mVCMotorSlot, mVCMotorReversal, mVCMotorAmp);
+        }
         mPlayer->setVolume(mLeftVolume, mRightVolume);
         mPlayer->setAuxEffectSendLevel(mSendLevel);
         mCurrentState = MEDIA_PLAYER_STARTED;
@@ -432,6 +440,9 @@ status_t MediaPlayer::setPlaybackSettings(const AudioPlaybackRate& rate)
             && (mCurrentState & (MEDIA_PLAYER_PREPARED | MEDIA_PLAYER_PAUSED
                     | MEDIA_PLAYER_PLAYBACK_COMPLETE))) {
         mPlayer->setLooping(mLoop);
+        if (mIsVCMotorPlayer) { // PICO: Phoenix VCMotor
+            mPlayer->setVCMotorParams(mVCMotorSlot, mVCMotorReversal, mVCMotorAmp);
+        }
         mPlayer->setVolume(mLeftVolume, mRightVolume);
         mPlayer->setAuxEffectSendLevel(mSendLevel);
     }
@@ -692,6 +703,33 @@ bool MediaPlayer::isLooping() {
     }
     ALOGV("isLooping: no active player");
     return false;
+}
+
+// PICO: Phoenix VCMotor
+status_t MediaPlayer::setVCMotorParams(int slot, int reversal)
+{
+    Mutex::Autolock _l(mLock);
+    mIsVCMotorPlayer = true;
+    mVCMotorSlot = slot;
+    mVCMotorReversal = reversal;
+    mVCMotorAmp = 1.0f;
+    if (mPlayer != 0) {
+        mPlayer->setVCMotorParams(slot, reversal, 1.0f);
+    }
+    return OK;
+}
+
+status_t MediaPlayer::setVCMotorParams(int slot, int reversal, float amp)
+{
+    Mutex::Autolock _l(mLock);
+    mIsVCMotorPlayer = true;
+    mVCMotorSlot = slot;
+    mVCMotorReversal = reversal;
+    mVCMotorAmp = amp;
+    if (mPlayer != 0) {
+        return mPlayer->setVCMotorParams(slot, reversal, amp);
+    }
+    return OK;
 }
 
 status_t MediaPlayer::setVolume(float leftVolume, float rightVolume)

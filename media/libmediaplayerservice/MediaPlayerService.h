@@ -143,6 +143,12 @@ class MediaPlayerService : public BnMediaPlayerService
         virtual status_t        getRoutedDeviceId(audio_port_handle_t* deviceId);
         virtual status_t        enableAudioDeviceCallback(bool enabled);
 
+        // PICO: Phoenix VCMotor. The output of the session registered with AudioFlinger
+        // "key_setHapticEffectSessionId" is a VCMotor output: its AudioTracks are VCMotor
+        // tracks. (virtual in MediaPlayerBase::AudioSink in the factory, used by NuPlayer)
+        virtual bool            isVCMotorOutput() const;
+                void            setVCMotorParams(bool enabled, int slot, int reversal, float amp);
+
     private:
         static void             setMinBufferCount();
         static void             CallbackWrapper(
@@ -159,6 +165,11 @@ class MediaPlayerService : public BnMediaPlayerService
         CallbackData *          mCallbackData;
         audio_stream_type_t     mStreamType;
         audio_attributes_t *    mAttributes;
+        // PICO: Phoenix VCMotor parameters of the AudioTracks, protected by mLock
+        int                     mVCMotorSlot;
+        int                     mVCMotorReversal;
+        float                   mVCMotorAmp;
+        bool                    mIsVCMotorOutput;
         float                   mLeftVolume;
         float                   mRightVolume;
         AudioPlaybackRate       mPlaybackRate;
@@ -337,6 +348,7 @@ private:
         virtual status_t        notifyAt(int64_t mediaTimeUs);
         virtual status_t        setAudioStreamType(audio_stream_type_t type);
         virtual status_t        setLooping(int loop);
+        virtual status_t        setVCMotorParams(int slot, int reversal, float amp); // PICO
         virtual status_t        setVolume(float leftVolume, float rightVolume);
         virtual status_t        invoke(const Parcel& request, Parcel *reply);
         virtual status_t        setMetadataFilter(const Parcel& filter);

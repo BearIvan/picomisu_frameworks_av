@@ -159,6 +159,10 @@ public:
         virtual status_t    setOutputDevice(audio_port_handle_t deviceId) = 0;
         virtual status_t    getRoutedDeviceId(audio_port_handle_t* deviceId) = 0;
         virtual status_t    enableAudioDeviceCallback(bool enabled) = 0;
+
+        // PICO: Phoenix VCMotor, true when the sink feeds the voice coil motors (the
+        // AudioTracks of MediaPlayerService::AudioOutput are then VCMotor tracks)
+        virtual bool        isVCMotorOutput() const { return false; }
     };
 
                         MediaPlayerBase() {}

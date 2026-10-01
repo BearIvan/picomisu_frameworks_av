@@ -608,6 +608,9 @@ using effect_buffer_t = int16_t;
         virtual sp<media::VolumeShaper::State> getVolumeShaperState(int id) override;
         virtual status_t    getTimestamp(AudioTimestamp& timestamp);
         virtual void        signal(); // signal playback thread for a change in control block
+        // PICO: Phoenix VCMotor
+        virtual status_t    setVCMotorParams(int slot, int reversal, float amp);
+        virtual void        setVCMotorTrackEnabled(bool enabled);
 
         virtual status_t onTransact(
             uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags);

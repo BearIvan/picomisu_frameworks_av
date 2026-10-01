@@ -86,6 +86,14 @@ public:
 
     /* gets the volume shaper state */
     virtual sp<media::VolumeShaper::State> getVolumeShaperState(int id) = 0;
+
+    // PICO: Phoenix VCMotor (voice coil motor) haptics driven by the track PCM.
+    /* Selects the motor(s) fed by the track: slot 0 none, 1 left channel, 2 right channel,
+     * 3 both; reversal 1 swaps the channels; amp scales the samples. */
+    virtual status_t    setVCMotorParams(int slot, int reversal, float amp) = 0;
+
+    /* Turns the PCM of the track into vibration data (see AudioFlinger Track::getNextBuffer) */
+    virtual void        setVCMotorTrackEnabled(bool enabled) = 0;
 };
 
 // ----------------------------------------------------------------------------

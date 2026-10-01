@@ -83,6 +83,8 @@ public:
     virtual status_t        reset() = 0;
     virtual status_t        setAudioStreamType(audio_stream_type_t type) = 0;
     virtual status_t        setLooping(int loop) = 0;
+    // PICO: Phoenix VCMotor haptics driven by the audio of the player (see AudioTrack)
+    virtual status_t        setVCMotorParams(int slot, int reversal, float amp) = 0;
     virtual status_t        setVolume(float leftVolume, float rightVolume) = 0;
     virtual status_t        setAuxEffectSendLevel(float level) = 0;
     virtual status_t        attachAuxEffect(int effectId) = 0;

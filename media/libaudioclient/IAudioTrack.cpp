@@ -44,6 +44,9 @@ enum {
     SIGNAL,
     APPLY_VOLUME_SHAPER,
     GET_VOLUME_SHAPER_STATE,
+    // PICO: Phoenix VCMotor
+    SET_VCMOTOR_PARAMS,
+    SET_VCMOTOR_TRACK_ENABLED,
 };
 
 class BpAudioTrack : public BpInterface<IAudioTrack>
@@ -207,6 +210,29 @@ public:
         }
         return state;
     }
+
+    // PICO: Phoenix VCMotor
+    virtual status_t setVCMotorParams(int slot, int reversal, float amp)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioTrack::getInterfaceDescriptor());
+        data.writeInt32(slot);
+        data.writeInt32(reversal);
+        data.writeFloat(amp);
+        status_t status = remote()->transact(SET_VCMOTOR_PARAMS, data, &reply);
+        if (status == NO_ERROR) {
+            status = reply.readInt32();
+        }
+        return status;
+    }
+
+    virtual void setVCMotorTrackEnabled(bool enabled)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioTrack::getInterfaceDescriptor());
+        data.writeBool(enabled);
+        remote()->transact(SET_VCMOTOR_TRACK_ENABLED, data, &reply);
+    }
 };
 
 IMPLEMENT_META_INTERFACE(AudioTrack, "android.media.IAudioTrack");
@@ -307,6 +333,20 @@ status_t BnAudioTrack::onTransact(
                      status = state->writeToParcel(reply);
                 }
             }
+            return NO_ERROR;
+        } break;
+        // PICO: Phoenix VCMotor
+        case SET_VCMOTOR_PARAMS: {
+            CHECK_INTERFACE(IAudioTrack, data, reply);
+            const int slot = data.readInt32();
+            const int reversal = data.readInt32();
+            const float amp = data.readFloat();
+            reply->writeInt32(setVCMotorParams(slot, reversal, amp));
+            return NO_ERROR;
+        } break;
+        case SET_VCMOTOR_TRACK_ENABLED: {
+            CHECK_INTERFACE(IAudioTrack, data, reply);
+            setVCMotorTrackEnabled(data.readBool());
             return NO_ERROR;
         } break;
         default:
