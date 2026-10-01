@@ -57,6 +57,14 @@ cc_library_shared {
         "libvibrator",
     ],
 
+    // PICO: audio event tracking (factory libaudioeventtracking.so, 64-bit only).
+    header_libs: ["libaudioeventtracking_headers"],
+    arch: {
+        arm64: {
+            shared_libs: ["libaudioeventtracking"],
+        },
+    },
+
     static_libs: [
         "libcpustats",
         "libsndfile",

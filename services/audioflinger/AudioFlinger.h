@@ -83,7 +83,7 @@
 #include "SpdifStreamOut.h"
 #include "AudioHwDevice.h"
 #include "NBAIO_Tee.h"
-#include "PicoAudioEventTracker.h"
+#include <audioeventtracking/AudioEventTracker.h>
 
 #include <powermanager/IPowerManager.h>
 

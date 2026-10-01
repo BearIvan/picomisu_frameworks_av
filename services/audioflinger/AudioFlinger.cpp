@@ -2719,7 +2719,8 @@ status_t AudioFlinger::closeOutput_nonvirtual(audio_io_handle_t output)
         delete out;
     }
     // PICO: audio event tracking
-    pico::audioeventtracking::AudioEventTrackerBridge::onAudioFlingerThreadClosed(output);
+    pico::audioeventtracking::AudioEventTracker::getInstance()->onAudioFlingerThreadClosed(
+            output);
     return NO_ERROR;
 }
 
@@ -2972,7 +2973,8 @@ status_t AudioFlinger::closeInput_nonvirtual(audio_io_handle_t input)
         delete in;
     }
     // PICO: audio event tracking
-    pico::audioeventtracking::AudioEventTrackerBridge::onAudioFlingerThreadClosed(input);
+    pico::audioeventtracking::AudioEventTracker::getInstance()->onAudioFlingerThreadClosed(
+            input);
     return NO_ERROR;
 }
 

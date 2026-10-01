@@ -105,8 +105,8 @@ public:
                             if (!isPatchTrack()) {
                                 mSilenced = silenced;
                                 // PICO: audio event tracking
-                                pico::audioeventtracking::AudioEventTrackerBridge::
-                                        onCaptureSilenced(mPortId, silenced);
+                                pico::audioeventtracking::AudioEventTracker::getInstance()
+                                        ->onCaptureSilenced(mPortId, silenced);
                             }
                         }
             bool        isSilenced() const;

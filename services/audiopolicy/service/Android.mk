@@ -19,7 +19,8 @@ LOCAL_HEADER_LIBRARIES := \
     libaudiopolicycommon \
     libaudiopolicyengine_interface_headers \
     libaudiopolicymanager_interface_headers \
-    libaudiohal_headers
+    libaudiohal_headers \
+    libaudioeventtracking_headers
 
 LOCAL_SHARED_LIBRARIES := \
     libcutils \
@@ -37,6 +38,9 @@ LOCAL_SHARED_LIBRARIES := \
     libsensorprivacy \
     libaudiohal \
     libstagefright_foundation
+
+# PICO: audio event tracking (factory libaudioeventtracking.so, 64-bit only).
+LOCAL_SHARED_LIBRARIES_arm64 := libaudioeventtracking
 
 LOCAL_EXPORT_SHARED_LIBRARY_HEADERS := \
     libsensorprivacy

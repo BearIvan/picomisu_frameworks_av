@@ -18,7 +18,7 @@
 //#define LOG_NDEBUG 0
 
 #include "AudioPolicyService.h"
-#include "PicoAudioEventTracker.h"
+#include <audioeventtracking/AudioEventTracker.h>
 #include <AudioOutputDescriptor.h>
 #include <AudioRoute.h>
 #include <HwModule.h>
@@ -349,7 +349,8 @@ status_t AudioPolicyService::doStartOutput(audio_port_handle_t portId)
                 event.mixerChannelMask = mixerChannelMask;
                 event.spatializeFlags = spatializeFlags;
                 event.spatialized = spatialized;
-                pico::audioeventtracking::AudioEventTrackerBridge::onPlaybackStarted(event);
+                pico::audioeventtracking::AudioEventTracker::getInstance()->onPlaybackStarted(
+                        event);
             }
         }
     }

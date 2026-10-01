@@ -741,7 +741,7 @@ void AudioFlinger::ThreadBase::processConfigEvents_l()
                     (unsigned)oldDevice, toString(oldDevice).c_str(),
                     (unsigned)newDevice, toString(newDevice).c_str());
             // PICO: audio event tracking
-            pico::audioeventtracking::AudioEventTrackerBridge::onDeviceChanged(
+            pico::audioeventtracking::AudioEventTracker::getInstance()->onDeviceChanged(
                     mId, oldDevice, newDevice);
         } break;
         case CFG_EVENT_RELEASE_AUDIO_PATCH: {
