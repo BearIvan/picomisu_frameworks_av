@@ -9,7 +9,9 @@ cc_library_headers {
 // Effect factory library
 cc_library_shared {
     name: "libeffects",
-    vendor: true,
+    // PICO: also on /system as on the factory PICO OS 5.13.7, for the local effects of
+    // libaudiohal (EffectHalLocal, spatializer).
+    vendor_available: true,
     srcs: [
          "EffectsFactory.c",
          "EffectsConfigLoader.c",

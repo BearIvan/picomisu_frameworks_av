@@ -17,12 +17,16 @@
 #define LOG_TAG "EffectsFactoryHalHidl"
 //#define LOG_NDEBUG 0
 
+#include <string.h>
+
 #include <cutils/native_handle.h>
+#include <media/EffectsFactoryApi.h>
 
 #include "EffectsFactoryHalHidl.h"
 #include "ConversionHelperHidl.h"
 #include "EffectBufferHalHidl.h"
 #include "EffectHalHidl.h"
+#include "EffectHalLocal.h"
 #include "HidlUtils.h"
 
 using ::android::hardware::audio::common::CPP_VERSION::implementation::HidlUtils;
@@ -34,6 +38,11 @@ namespace CPP_VERSION {
 
 using namespace ::android::hardware::audio::common::CPP_VERSION;
 using namespace ::android::hardware::audio::effect::CPP_VERSION;
+
+// PICO: implementation uuid of the PICO spatializer effect (vendor audio_effects.xml
+// "spatializer", libspatializer.so), as in the factory libaudiohal@5.0.
+static const effect_uuid_t kSpatializerImplUuid =
+        { 0x61e3f827, 0x0417, 0x4360, 0xb0a7, { 0x3d, 0xe0, 0x52, 0x90, 0x1c, 0xac } };
 
 EffectsFactoryHalHidl::EffectsFactoryHalHidl() : ConversionHelperHidl("EffectsFactory") {
     mEffectsFactory = IEffectsFactory::getService();
@@ -108,6 +117,17 @@ status_t EffectsFactoryHalHidl::createEffect(
         const effect_uuid_t *pEffectUuid, int32_t sessionId, int32_t ioId,
         sp<EffectHalInterface> *effect) {
     if (mEffectsFactory == 0) return NO_INIT;
+    // PICO: as the factory, the spatializer effect is created in this process by the system
+    // effect factory (libeffects, /system/lib64/soundfx/libspatializer.so).
+    if (pEffectUuid != nullptr &&
+            memcmp(pEffectUuid, &kSpatializerImplUuid, sizeof(effect_uuid_t)) == 0) {
+        effect_handle_t handle;
+        int status = EffectCreate(pEffectUuid, sessionId, ioId, &handle);
+        if (status == 0) {
+            *effect = new EffectHalLocal(handle);
+        }
+        return status;
+    }
     Uuid hidlUuid;
     HidlUtils::uuidFromHal(*pEffectUuid, &hidlUuid);
     Result retval = Result::NOT_INITIALIZED;

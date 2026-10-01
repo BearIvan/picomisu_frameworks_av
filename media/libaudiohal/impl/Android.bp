@@ -5,6 +5,7 @@ cc_defaults {
         "DeviceHalLocal.cpp",
         "DevicesFactoryHalHybrid.cpp",
         "DevicesFactoryHalLocal.cpp",
+        "EffectHalLocal.cpp", // PICO
         "StreamHalLocal.cpp",
 
         "ConversionHelperHidl.cpp",
@@ -42,6 +43,8 @@ cc_defaults {
         "libmedia_helper",
         "libmediautils",
         "libutils",
+        // PICO: local effects (EffectHalLocal), NEEDED by the factory libaudiohal@5.0
+        "libeffects",
     ],
     header_libs: [
         "android.hardware.audio.common.util@all-versions",
