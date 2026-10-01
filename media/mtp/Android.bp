@@ -49,6 +49,8 @@ cc_library_shared {
     shared_libs: [
         "libasyncio",
         "libbase",
+        // PICO: property_get of the device info model, as the factory libmtp.
+        "libcutils",
         "liblog",
         "libusbhost",
     ],

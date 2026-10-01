@@ -57,6 +57,9 @@ void MtpPacket::allocate(size_t length) {
         int newLength = length + mAllocationIncrement;
         mBuffer = (uint8_t *)realloc(mBuffer, newLength);
         if (!mBuffer) {
+            // PICO (factory PICO OS 5.13.7)
+            ALOGE("MtpPacket::allocate length=%zu mBufferSize=%zu mAllocationIncrement=%zu!",
+                  length, mBufferSize, static_cast<size_t>(mAllocationIncrement));
             ALOGE("out of memory!");
             abort();
         }

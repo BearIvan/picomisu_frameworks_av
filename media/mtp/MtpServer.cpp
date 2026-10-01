@@ -18,6 +18,7 @@
 #include <android-base/logging.h>
 #include <android-base/properties.h>
 #include <chrono>
+#include <cutils/properties.h>  // PICO: device info model property
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -266,18 +267,19 @@ void MtpServer::sendObjectInfoChanged(MtpObjectHandle handle) {
     sendEvent(MTP_EVENT_OBJECT_INFO_CHANGED, handle);
 }
 
+// PICO (factory PICO OS 5.13.7): these event logs are ALOGI.
 void MtpServer::sendStoreAdded(MtpStorageID id) {
-    ALOGV("sendStoreAdded %08X\n", id);
+    ALOGI("sendStoreAdded %08X\n", id);
     sendEvent(MTP_EVENT_STORE_ADDED, id);
 }
 
 void MtpServer::sendStoreRemoved(MtpStorageID id) {
-    ALOGV("sendStoreRemoved %08X\n", id);
+    ALOGI("sendStoreRemoved %08X\n", id);
     sendEvent(MTP_EVENT_STORE_REMOVED, id);
 }
 
 void MtpServer::sendDevicePropertyChanged(MtpDeviceProperty property) {
-    ALOGV("sendDevicePropertyChanged %d\n", property);
+    ALOGI("sendDevicePropertyChanged %d\n", property);
     sendEvent(MTP_EVENT_DEVICE_PROP_CHANGED, property);
 }
 
@@ -347,11 +349,15 @@ bool MtpServer::handleRequest() {
     ALOGV("got command %s (%x)", MtpDebug::getOperationCodeName(operation), operation);
 
     switch (operation) {
+        // PICO (factory PICO OS 5.13.7): device info, open session and storage info requests
+        // are logged after they are handled.
         case MTP_OPERATION_GET_DEVICE_INFO:
             response = doGetDeviceInfo();
+            ALOGI("got command %s (%x)", MtpDebug::getOperationCodeName(operation), operation);
             break;
         case MTP_OPERATION_OPEN_SESSION:
             response = doOpenSession();
+            ALOGI("got command %s (%x)", MtpDebug::getOperationCodeName(operation), operation);
             break;
         case MTP_OPERATION_RESET_DEVICE:
         case MTP_OPERATION_CLOSE_SESSION:
@@ -362,6 +368,7 @@ bool MtpServer::handleRequest() {
             break;
          case MTP_OPERATION_GET_STORAGE_INFO:
             response = doGetStorageInfo();
+            ALOGI("got command %s (%x)", MtpDebug::getOperationCodeName(operation), operation);
             break;
         case MTP_OPERATION_GET_OBJECT_PROPS_SUPPORTED:
             response = doGetObjectPropsSupported();
@@ -492,7 +499,12 @@ MtpResponseCode MtpServer::doGetDeviceInfo() {
     mData.putAUInt16(playbackFormats);  // Playback Formats
 
     mData.putString(mDeviceInfoManufacturer); // Manufacturer
-    mData.putString(mDeviceInfoModel); // Model
+    // PICO (factory PICO OS 5.13.7): the model is pxr.vendorhw.product.model ("MTP Device").
+    char model[PROPERTY_VALUE_MAX];
+    property_get("pxr.vendorhw.product.model", model, "MTP Device");
+    string.set(model);
+    mData.putString(string); // Model
+    ALOGI("Mtp doGetDeviceInfo  device=%s\n", model);
     mData.putString(mDeviceInfoDeviceVersion); // Device Version
     mData.putString(mDeviceInfoSerialNumber); // Serial Number
 
