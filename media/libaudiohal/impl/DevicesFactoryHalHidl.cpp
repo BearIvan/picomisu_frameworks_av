@@ -15,12 +15,14 @@
  */
 
 #include <string.h>
+#include <set>
 #include <vector>
 
 #define LOG_TAG "DevicesFactoryHalHidl"
 //#define LOG_NDEBUG 0
 
 #include PATH(android/hardware/audio/FILE_VERSION/IDevice.h)
+#include <android/hidl/manager/1.0/IServiceManager.h>
 #include <media/audiohal/hidl/HalDeathHandler.h>
 #include <utils/Log.h>
 
@@ -109,6 +111,29 @@ status_t DevicesFactoryHalHidl::openDevice(const char *name, sp<DeviceHalInterfa
     }
     ALOGW("The specified device name is not recognized: \"%s\"", name);
     return BAD_VALUE;
+}
+
+status_t DevicesFactoryHalHidl::getHalPids(std::vector<pid_t> *pids) {
+    std::set<pid_t> pidsSet;
+    for (const auto& factory : mDeviceFactories) {
+        using ::android::hidl::base::V1_0::DebugInfo;
+        using android::hidl::manager::V1_0::IServiceManager;
+
+        DebugInfo debugInfo;
+        auto ret = factory->getDebugInfo([&] (const auto &info) {
+                       debugInfo = info;
+                   });
+        if (!ret.isOk()) {
+           return INVALID_OPERATION;
+        }
+        if (debugInfo.pid == (int)IServiceManager::PidConstant::NO_PID) {
+            continue;
+        }
+        pidsSet.insert(debugInfo.pid);
+    }
+
+    *pids = {pidsSet.begin(), pidsSet.end()};
+    return NO_ERROR;
 }
 
 } // namespace CPP_VERSION

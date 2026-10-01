@@ -195,6 +195,9 @@ AudioFlinger::AudioFlinger()
     mEffectsFactoryHal = EffectsFactoryHalInterface::create();
 
     mMediaLogNotifier->run("MediaLogNotifier");
+    std::vector<pid_t> halPids;
+    mDevicesFactoryHal->getHalPids(&halPids);
+    TimeCheck::setAudioHalPids(halPids);
 
     // PICO: restore the record thread state of a previous audio server instance
     char value[PROPERTY_VALUE_MAX] = {};
