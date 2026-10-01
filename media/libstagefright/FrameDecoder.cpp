@@ -21,7 +21,6 @@
 #include <binder/MemoryBase.h>
 #include <binder/MemoryHeapBase.h>
 #include <gui/BufferQueue.h>
-#include <gui/IConsumerListener.h>
 #include <gui/Surface.h>
 #include <inttypes.h>
 #include <media/ICrypto.h>
@@ -44,13 +43,11 @@ namespace android {
 static const int64_t kBufferTimeOutUs = 10000LL; // 10 msec
 static const size_t kRetryCount = 50; // must be >0
 
-// PICO: VR type reported by the decoder in the output buffer flags
-// (passed through from the OMX buffer flags by ACodecBufferChannel).
+// PICO: VR type reported by the decoder in the output buffer flags (see extractInternal).
 static const uint32_t kVRTypeValidFlag = 0x40000000;
 static const uint32_t kVRTypeShift = 24;
 static const uint32_t kVRTypeMask = 0x3f;
 
-// PICO: consumer of the dummy output surface used for VR type detection.
 struct DummyConsumer : public BnConsumerListener {
     void onFrameAvailable(const BufferItem& /* item */) override {}
     void onBuffersReleased() override {}
@@ -99,7 +96,7 @@ sp<IMemory> allocVideoFrame(const sp<MetaData>& trackMeta,
         return NULL;
     }
     sp<IMemory> frameMem = new MemoryBase(heap, 0, size);
-    if (frameMem == NULL) {
+    if (frameMem == NULL || frameMem->pointer() == NULL) {
         ALOGE("not enough memory for VideoFrame size=%zu", size);
         return NULL;
     }
@@ -227,6 +224,7 @@ status_t FrameDecoder::init(
         sp<IGraphicBufferProducer> producer;
         sp<IGraphicBufferConsumer> consumer;
         BufferQueue::createBufferQueue(&producer, &consumer);
+        // PICO: the frames are dropped by the consumer of the dummy surface.
         consumer->consumerConnect(new DummyConsumer, false);
         surface = new Surface(producer);
     }
@@ -299,6 +297,8 @@ status_t FrameDecoder::extractFrames(std::vector<sp<IMemory> >* frames) {
 }
 
 int FrameDecoder::getVRType(int64_t frameTimeUs) {
+    // PICO: decodes the sync frame at frameTimeUs into the dummy surface; the VR type
+    // is passed through from the OMX buffer flags by ACodecBufferChannel.
     mVRType = -1;
     mDecoder->flush();
     mHaveMoreInputs = true;
@@ -592,6 +592,11 @@ status_t VideoFrameDecoder::onOutputReceived(
             0,
             0,
             dstBpp());
+    if (frameMem == nullptr) {
+        ALOGW("%s: allocVideoFrame failed", __FUNCTION__);
+        return NO_MEMORY;
+    }
+
     addFrame(frameMem);
     VideoFrame* frame = static_cast<VideoFrame*>(frameMem->pointer());
 
@@ -788,6 +793,9 @@ status_t ImageDecoder::onOutputReceived(
     if (mFrame == NULL) {
         sp<IMemory> frameMem = allocVideoFrame(
                 trackMeta(), mWidth, mHeight, mTileWidth, mTileHeight, dstBpp());
+        if (frameMem == nullptr) {
+            return NO_MEMORY;
+        }
         mFrame = static_cast<VideoFrame*>(frameMem->pointer());
 
         addFrame(frameMem);
