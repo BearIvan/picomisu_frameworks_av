@@ -21,15 +21,8 @@ cc_binary {
             exclude_shared_libs: ["libavservices_minijail"],
             shared_libs: ["libavservices_minijail_vendor"],
         },
-        android: {
-            product_variables: {
-                malloc_not_svelte: {
-                    // Scudo increases memory footprint, so only enable on
-                    // non-svelte devices.
-                    shared_libs: ["libc_scudo"],
-                },
-            },
-        },
+        // PICO: no libc_scudo, as on the factory image (whose jemalloc is
+        // the non-svelte configuration).
     },
 
     header_libs: [
