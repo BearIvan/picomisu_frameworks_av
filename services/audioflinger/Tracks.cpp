@@ -536,6 +536,7 @@ AudioFlinger::PlaybackThread::Track::Track(
             track_type type,
             audio_port_handle_t portId,
             size_t frameCountToBeReady,
+            float speed,
             bool isSpatialized)
     :   TrackBase(thread, client, attr, sampleRate, format, channelMask, frameCount,
                   (sharedBuffer != 0) ? sharedBuffer->pointer() : buffer,
@@ -564,6 +565,7 @@ AudioFlinger::PlaybackThread::Track::Track(
     mResumeToStopping(false),
     mFlushHwPending(false),
     mFlags(flags),
+    mSpeed(speed), // PICO
     mIsSpatialized(isSpatialized) // PICO
 {
     // client == 0 implies sharedBuffer == 0
@@ -1590,8 +1592,15 @@ void AudioFlinger::PlaybackThread::Track::copyMetadataTo(MetadataInserter& backI
 
 void AudioFlinger::PlaybackThread::Track::setTeePatches(TeePatches teePatches) {
     forEachTeePatchTrack([](auto patchTrack) { patchTrack->destroy(); });
-    Mutex::Autolock _l(mTeePatchesLock); // PICO: interceptBuffer() runs on the mixer thread
-    mTeePatches = std::move(teePatches);
+    {
+        Mutex::Autolock _l(mTeePatchesLock); // PICO: interceptBuffer() runs on the mixer thread
+        mTeePatches = std::move(teePatches);
+    }
+    // PICO: Android 12 backport, the secondary outputs can be updated while the track plays.
+    if (mState == TrackBase::ACTIVE || mState == TrackBase::RESUMING ||
+            mState == TrackBase::STOPPING_1) {
+        forEachTeePatchTrack([](auto patchTrack) { patchTrack->start(); });
+    }
 }
 
 status_t AudioFlinger::PlaybackThread::Track::getTimestamp(AudioTimestamp& timestamp)

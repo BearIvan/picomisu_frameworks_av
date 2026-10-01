@@ -93,9 +93,9 @@ enum {
     SET_MASTER_BALANCE,
     GET_MASTER_BALANCE,
     SET_EFFECT_SUSPENDED,
-    // PICO OS 5.13.7: code 62 is the Android 11 UPDATE_SECONDARY_OUTPUTS of the factory
-    // (not in this tree), 63..65 the spatial audio backport.
-    RESERVED_UPDATE_SECONDARY_OUTPUTS,
+    // PICO OS 5.13.7: code 62 is the Android 12 UPDATE_SECONDARY_OUTPUTS backport of the
+    // factory, 63..65 the spatial audio backport.
+    UPDATE_SECONDARY_OUTPUTS,
     INVALIDATE_TRACK,
     SET_MIXER_CONFIG,
     SET_SPATIALIZATION_ENABLED,
@@ -970,6 +970,21 @@ public:
         status = reply.readParcelableVector(microphones);
         return status;
     }
+
+    // PICO: as the factory, without interface token and with the status of the server
+    // returned as the transaction status (only called inside audioserver, where the binder
+    // object is local and this proxy is not used).
+    virtual status_t updateSecondaryOutputs(
+            const std::vector<media::TrackSecondaryOutputInfo>& trackSecondaryOutputInfos)
+    {
+        Parcel data, reply;
+        data.writeParcelableVector(trackSecondaryOutputInfos);
+        status_t status = remote()->transact(UPDATE_SECONDARY_OUTPUTS, data, &reply);
+        if (status != NO_ERROR) {
+            status = reply.readInt32();
+        }
+        return status;
+    }
 };
 
 IMPLEMENT_META_INTERFACE(AudioFlinger, "android.media.IAudioFlinger");
@@ -1025,7 +1040,8 @@ status_t BnAudioFlinger::onTransact(
         case SET_MODE:
         case SET_MIC_MUTE:
         case SET_LOW_RAM_DEVICE:
-        case SYSTEM_READY: {
+        case SYSTEM_READY:
+        case UPDATE_SECONDARY_OUTPUTS: {
             if (!isServiceUid(IPCThreadState::self()->getCallingUid())) {
                 ALOGW("%s: transaction %d received from PID %d unauthorized UID %d",
                       __func__, code, IPCThreadState::self()->getCallingPid(),
@@ -1659,6 +1675,13 @@ status_t BnAudioFlinger::onTransact(
                 reply->writeParcelableVector(microphones);
             }
             return NO_ERROR;
+        }
+        case UPDATE_SECONDARY_OUTPUTS: {
+            // PICO: the status is returned as the transaction status, as on the factory.
+            CHECK_INTERFACE(IAudioFlinger, data, reply);
+            std::vector<media::TrackSecondaryOutputInfo> trackSecondaryOutputInfos;
+            data.readParcelableVector(&trackSecondaryOutputInfos);
+            return updateSecondaryOutputs(trackSecondaryOutputInfos);
         }
         default:
             return BBinder::onTransact(code, data, reply, flags);

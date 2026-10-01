@@ -19,6 +19,7 @@
 
 #include <media/AudioSystem.h>
 #include <media/AudioPolicy.h>
+#include <media/TrackSecondaryOutputInfo.h>
 #include <utils/String8.h>
 
 namespace android {
@@ -416,6 +417,11 @@ public:
                                                 std::vector<effect_descriptor_t> effects,
                                                 audio_patch_handle_t patchHandle,
                                                 audio_source_t source) = 0;
+
+    // PICO: Android 12 backport (factory vtable slot 26). Updates the secondary outputs of
+    // playback tracks in audio flinger.
+    virtual status_t updateSecondaryOutputs(
+            const std::vector<media::TrackSecondaryOutputInfo>& trackSecondaryOutputInfos) = 0;
 };
 
 extern "C" AudioPolicyInterface* createAudioPolicyManager(AudioPolicyClientInterface *clientInterface);

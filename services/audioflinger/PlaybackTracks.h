@@ -78,6 +78,8 @@ public:
                                 /** default behaviour is to start when there are as many frames
                                   * ready as possible (aka. Buffer is full). */
                                 size_t frameCountToBeReady = SIZE_MAX,
+                                // PICO: Android 12 backport, playback speed of the client
+                                float speed = 1.0f,
                                 // PICO: on the spatializer output for spatialization
                                 bool isSpatialized = false);
     virtual             ~Track();
@@ -124,6 +126,9 @@ public:
     virtual status_t    setSyncEvent(const sp<SyncEvent>& event);
 
     virtual bool        isFastTrack() const { return (mFlags & AUDIO_OUTPUT_FLAG_FAST) != 0; }
+            // PICO: Android 12 backport (secondary outputs)
+            audio_output_flags_t getOutputFlags() const { return mFlags; }
+            float       getSpeed() const { return mSpeed; }
 
             double      bufferLatencyMs() const override {
                             return isStatic() ? 0. : TrackBase::bufferLatencyMs();
@@ -326,10 +331,10 @@ private:
     audio_output_flags_t mFlags;
     // If the last track change was notified to the client with readAndClearHasChanged
     std::atomic_flag     mChangeNotified = ATOMIC_FLAG_INIT;
-    TeePatches  mTeePatches;
+    TeePatches  mTeePatches;                    // 0x338
 
-    // PICO: factory Track fields (factory offsets for reference; the factory Track also has
-    // a float at 0x350 (playback speed, Android 11 secondary outputs), not ported).
+    // PICO: factory Track fields (factory offsets for reference).
+    const float         mSpeed;                 // 0x350: Android 12 secondary outputs backport
     Mutex               mTeePatchesLock;        // 0x354: mTeePatches in interceptBuffer()
                                                 // and setTeePatches()
     bool                mIsSpatialized;               // 0x37c: PICO spatialization requested

@@ -5583,6 +5583,9 @@ void AudioPolicyManager::checkOutputForAllStrategies()
 
 void AudioPolicyManager::checkSecondaryOutputs() {
     std::set<audio_stream_type_t> streamsToInvalidate;
+    // PICO: Android 12 backport, the secondary outputs of PCM tracks are updated in audio
+    // flinger instead of invalidating their stream.
+    std::vector<media::TrackSecondaryOutputInfo> trackSecondaryOutputs;
     for (size_t i = 0; i < mOutputs.size(); i++) {
         const sp<SwAudioOutputDescriptor>& outputDescriptor = mOutputs[i];
         for (const sp<TrackClientDescriptor>& client : outputDescriptor->getClientIterable()) {
@@ -5590,13 +5593,36 @@ void AudioPolicyManager::checkSecondaryOutputs() {
             std::vector<sp<SwAudioOutputDescriptor>> secondaryDescs;
             status_t status = mPolicyMixes.getOutputForAttr(client->attributes(), client->uid(),
                                                             client->flags(), desc, &secondaryDescs);
-            if (status != OK ||
-                !std::equal(client->getSecondaryOutputs().begin(),
-                            client->getSecondaryOutputs().end(),
-                            secondaryDescs.begin(), secondaryDescs.end())) {
+            if (status != OK) {
                 streamsToInvalidate.insert(client->stream());
+            } else if (!std::equal(client->getSecondaryOutputs().begin(),
+                                   client->getSecondaryOutputs().end(),
+                                   secondaryDescs.begin(), secondaryDescs.end())) {
+                if (!audio_is_linear_pcm(client->config().format)) {
+                    // If the format is not PCM, the tracks should be invalidated to get correct
+                    // behavior when the secondary output is changed.
+                    streamsToInvalidate.insert(client->stream());
+                } else {
+                    std::vector<wp<SwAudioOutputDescriptor>> weakSecondaryOutputs;
+                    std::vector<audio_io_handle_t> secondaryOutputIds;
+                    for (const auto& secondaryDesc : secondaryDescs) {
+                        secondaryOutputIds.push_back(secondaryDesc->mIoHandle);
+                        weakSecondaryOutputs.push_back(secondaryDesc);
+                    }
+                    media::TrackSecondaryOutputInfo trackSecondaryOutputInfo(
+                            client->portId(), secondaryOutputIds);
+                    trackSecondaryOutputs.push_back(trackSecondaryOutputInfo);
+                    client->setSecondaryOutputs(std::move(weakSecondaryOutputs));
+                }
             }
         }
+    }
+    if (!trackSecondaryOutputs.empty()) {
+        ALOGV("checkSecondaryOutputs trackSecondaryOutputs :");
+        for (auto trackSecondaryOutputInfo : trackSecondaryOutputs) {
+            ALOGV("info : %s", trackSecondaryOutputInfo.toString().c_str());
+        }
+        mpClientInterface->updateSecondaryOutputs(trackSecondaryOutputs);
     }
     for (audio_stream_type_t stream : streamsToInvalidate) {
         ALOGD("%s Invalidate stream %d due to secondary output change", __func__, stream);

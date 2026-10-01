@@ -758,6 +758,10 @@ private:
 
         virtual audio_unique_id_t newAudioUniqueId(audio_unique_id_use_t use);
 
+        // PICO: Android 12 backport
+        virtual status_t updateSecondaryOutputs(
+                const std::vector<media::TrackSecondaryOutputInfo>& trackSecondaryOutputInfos);
+
         // PICO: spatializer requests (SpatializerPolicyCallback) forwarded to audio flinger
         status_t setSpatializationEnabled(audio_io_handle_t output, audio_port_handle_t portId,
                                           bool enabled);

@@ -107,6 +107,10 @@ public:
     const std::vector<wp<SwAudioOutputDescriptor>>& getSecondaryOutputs() const {
         return mSecondaryOutputs;
     };
+    // PICO: Android 12 backport (AudioPolicyManager::checkSecondaryOutputs)
+    void setSecondaryOutputs(std::vector<wp<SwAudioOutputDescriptor>>&& secondaryOutputs) {
+        mSecondaryOutputs = std::move(secondaryOutputs);
+    }
     VolumeSource volumeSource() const { return mVolumeSource; }
 
     void setActive(bool active) override
@@ -135,7 +139,7 @@ private:
     const product_strategy_t mStrategy;
     const VolumeSource mVolumeSource;
     const audio_output_flags_t mFlags;
-    const std::vector<wp<SwAudioOutputDescriptor>> mSecondaryOutputs;
+    std::vector<wp<SwAudioOutputDescriptor>> mSecondaryOutputs;
 
     /**
      * required for duplicating thread, prevent from removing active client from an output

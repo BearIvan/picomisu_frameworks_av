@@ -977,6 +977,16 @@ public:
                 void        addPatchTrack(const sp<PatchTrack>& track);
                 void        deletePatchTrack(const sp<PatchTrack>& track);
 
+                // PICO: Android 12 backport (secondary outputs), inlined as on the factory.
+                sp<Track>   getTrackById_l(audio_port_handle_t trackId) {
+                                for (size_t i = 0; i < mTracks.size(); i++) {
+                                    if (mTracks[i]->portId() == trackId) {
+                                        return mTracks[i];
+                                    }
+                                }
+                                return nullptr;
+                            }
+
     virtual     void        toAudioPortConfig(struct audio_port_config *config);
 
                 // Return the asynchronous signal wait time.

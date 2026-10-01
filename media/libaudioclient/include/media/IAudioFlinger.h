@@ -36,6 +36,7 @@
 #include <media/IEffectClient.h>
 #include <utils/String8.h>
 #include <media/MicrophoneInfo.h>
+#include <media/TrackSecondaryOutputInfo.h>
 #include <vector>
 
 #include "android/media/IAudioRecord.h"
@@ -515,6 +516,11 @@ public:
 
     /* List available microphones and their characteristics */
     virtual status_t getMicrophones(std::vector<media::MicrophoneInfo> *microphones) = 0;
+
+    // PICO: Android 12 backport (factory transaction 62), called by the audio policy manager
+    // when the secondary outputs of playback tracks change (dynamic policy mixes).
+    virtual status_t updateSecondaryOutputs(
+            const std::vector<media::TrackSecondaryOutputInfo>& trackSecondaryOutputInfos) = 0;
 
     // PICO: spatial audio backport (factory transactions 63..65), called by the spatializer
     // of the audio policy service.

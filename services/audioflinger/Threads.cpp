@@ -2360,12 +2360,13 @@ sp<AudioFlinger::PlaybackThread::Track> AudioFlinger::PlaybackThread::createTrac
             }
         }
 
-        // PICO: isSpatialized: spatialization requested by the audio policy
+        // PICO: speed (Android 12 secondary outputs backport); isSpatialized: spatialization
+        // requested by the audio policy
         track = new Track(this, client, streamType, attr, sampleRate, format,
                           channelMask, frameCount,
                           nullptr /* buffer */, (size_t)0 /* bufferSize */, sharedBuffer,
                           sessionId, creatorPid, uid, *flags, TrackBase::TYPE_DEFAULT, portId,
-                          SIZE_MAX /*frameCountToBeReady*/, isSpatialized);
+                          SIZE_MAX /*frameCountToBeReady*/, speed, isSpatialized);
 
         lStatus = track != 0 ? track->initCheck() : (status_t) NO_MEMORY;
         if (lStatus != NO_ERROR) {

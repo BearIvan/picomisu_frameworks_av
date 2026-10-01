@@ -820,88 +820,8 @@ sp<IAudioTrack> AudioFlinger::createTrack(const CreateTrackInput& input,
             // Connect secondary outputs. Failure on a secondary output must not imped the primary
             // Any secondary output setup failure will lead to a desync between the AP and AF until
             // the track is destroyed.
-            TeePatches teePatches;
-            for (audio_io_handle_t secondaryOutput : secondaryOutputs) {
-                PlaybackThread *secondaryThread = checkPlaybackThread_l(secondaryOutput);
-                if (secondaryThread == NULL) {
-                    ALOGE("no playback thread found for secondary output %d", output.outputId);
-                    continue;
-                }
-
-                size_t sourceFrameCount = thread->frameCount() * output.sampleRate
-                                          / thread->sampleRate();
-                size_t sinkFrameCount = secondaryThread->frameCount() * output.sampleRate
-                                          / secondaryThread->sampleRate();
-                // If the secondary output has just been opened, the first secondaryThread write
-                // will not block as it will fill the empty startup buffer of the HAL,
-                // so a second sink buffer needs to be ready for the immediate next blocking write.
-                // Additionally, have a margin of one main thread buffer as the scheduling jitter
-                // can reorder the writes (eg if thread A&B have the same write intervale,
-                // the scheduler could schedule AB...BA)
-                size_t frameCountToBeReady = 2 * sinkFrameCount + sourceFrameCount;
-                // Total secondary output buffer must be at least as the read frames plus
-                // the margin of a few buffers on both sides in case the
-                // threads scheduling has some jitter.
-                // That value should not impact latency as the secondary track is started before
-                // its buffer is full, see frameCountToBeReady.
-                size_t frameCount = frameCountToBeReady + 2 * (sourceFrameCount + sinkFrameCount);
-                // The frameCount should also not be smaller than the secondary thread min frame
-                // count
-                size_t minFrameCount = AudioSystem::calculateMinFrameCount(
-                            [&] { Mutex::Autolock _l(secondaryThread->mLock);
-                                  return secondaryThread->latency_l(); }(),
-                            secondaryThread->mNormalFrameCount,
-                            secondaryThread->mSampleRate,
-                            output.sampleRate,
-                            input.speed);
-                frameCount = std::max(frameCount, minFrameCount);
-
-                using namespace std::chrono_literals;
-                auto inChannelMask = audio_channel_mask_out_to_in(input.config.channel_mask);
-                sp patchRecord = new RecordThread::PatchRecord(nullptr /* thread */,
-                                                               output.sampleRate,
-                                                               inChannelMask,
-                                                               input.config.format,
-                                                               frameCount,
-                                                               NULL /* buffer */,
-                                                               (size_t)0 /* bufferSize */,
-                                                               AUDIO_INPUT_FLAG_DIRECT,
-                                                               0ns /* timeout */);
-                status_t status = patchRecord->initCheck();
-                if (status != NO_ERROR) {
-                    ALOGE("Secondary output patchRecord init failed: %d", status);
-                    continue;
-                }
-
-                // TODO: We could check compatibility of the secondaryThread with the PatchTrack
-                // for fast usage: thread has fast mixer, sample rate matches, etc.;
-                // for now, we exclude fast tracks by removing the Fast flag.
-                const audio_output_flags_t outputFlags =
-                        (audio_output_flags_t)(output.flags & ~AUDIO_OUTPUT_FLAG_FAST);
-                sp patchTrack = new PlaybackThread::PatchTrack(secondaryThread,
-                                                               streamType,
-                                                               output.sampleRate,
-                                                               input.config.channel_mask,
-                                                               input.config.format,
-                                                               frameCount,
-                                                               patchRecord->buffer(),
-                                                               patchRecord->bufferSize(),
-                                                               outputFlags,
-                                                               0ns /* timeout */,
-                                                               frameCountToBeReady);
-                status = patchTrack->initCheck();
-                if (status != NO_ERROR) {
-                    ALOGE("Secondary output patchTrack init failed: %d", status);
-                    continue;
-                }
-                teePatches.push_back({patchRecord, patchTrack});
-                secondaryThread->addPatchTrack(patchTrack);
-                // In case the downstream patchTrack on the secondaryThread temporarily outlives
-                // our created track, ensure the corresponding patchRecord is still alive.
-                patchTrack->setPeerProxy(patchRecord, true /* holdReference */);
-                patchRecord->setPeerProxy(patchTrack, false /* holdReference */);
-            }
-            track->setTeePatches(std::move(teePatches));
+            // PICO: Android 12 backport, shared with updateSecondaryOutputs().
+            updateSecondaryOutputsForTrack_l(track.get(), thread, secondaryOutputs);
         }
 
         // move effect chain to this output thread if an effect on same session was waiting
@@ -2384,6 +2304,33 @@ status_t AudioFlinger::getMicrophones(std::vector<media::MicrophoneInfo> *microp
     return status;
 }
 
+// PICO: Android 12 backport, called by the audio policy manager (checkSecondaryOutputs) when
+// the secondary outputs of playback tracks change.
+status_t AudioFlinger::updateSecondaryOutputs(
+        const std::vector<media::TrackSecondaryOutputInfo>& trackSecondaryOutputInfos) {
+    Mutex::Autolock _l(mLock);
+    for (auto trackSecondaryOutputInfo : trackSecondaryOutputInfos) {
+        ALOGD("updateSecondaryOutputs trackSecondaryOutputInfo %s",
+                trackSecondaryOutputInfo.toString().c_str());
+        const audio_port_handle_t trackId = trackSecondaryOutputInfo.portId;
+        size_t i = 0;
+        for (; i < mPlaybackThreads.size(); ++i) {
+            PlaybackThread *thread = mPlaybackThreads.valueAt(i).get();
+            Mutex::Autolock _tl(thread->mLock);
+            sp<PlaybackThread::Track> track = thread->getTrackById_l(trackId);
+            if (track != nullptr) {
+                ALOGD("%s trackId: %u", __func__, trackId);
+                updateSecondaryOutputsForTrack_l(
+                        track.get(), thread, trackSecondaryOutputInfo.secondaryOutputIds);
+                break;
+            }
+        }
+        ALOGW_IF(i >= mPlaybackThreads.size(),
+                 "%s cannot find track with id %u", __func__, trackId);
+    }
+    return NO_ERROR;
+}
+
 // PICO: spatial audio backport, called by the spatializer of the audio policy service
 
 status_t AudioFlinger::invalidateTrack(audio_io_handle_t output, audio_port_handle_t portId)
@@ -3333,6 +3280,110 @@ AudioFlinger::PlaybackThread *AudioFlinger::fastPlaybackThread_l() const
         }
     }
     return minThread;
+}
+
+// PICO: Android 12 backport. The secondary outputs connection code of createTrack(), also used
+// by updateSecondaryOutputs(), with the factory logs and channel mask / format checks.
+void AudioFlinger::updateSecondaryOutputsForTrack_l(
+        PlaybackThread::Track* track,
+        PlaybackThread* thread,
+        const std::vector<audio_io_handle_t>& secondaryOutputs) const {
+    ALOGD("updateSecondaryOutputsForTrack_l trackId %u, secondaryOutputs size %zu",
+            track->portId(), secondaryOutputs.size());
+    TeePatches teePatches;
+    for (audio_io_handle_t secondaryOutput : secondaryOutputs) {
+        PlaybackThread *secondaryThread = checkPlaybackThread_l(secondaryOutput);
+        if (secondaryThread == nullptr) {
+            ALOGE("no playback thread found for secondary output %d", thread->id());
+            continue;
+        }
+
+        size_t sourceFrameCount = thread->frameCount() * track->sampleRate()
+                                  / thread->sampleRate();
+        size_t sinkFrameCount = secondaryThread->frameCount() * track->sampleRate()
+                                  / secondaryThread->sampleRate();
+        // If the secondary output has just been opened, the first secondaryThread write
+        // will not block as it will fill the empty startup buffer of the HAL,
+        // so a second sink buffer needs to be ready for the immediate next blocking write.
+        // Additionally, have a margin of one main thread buffer as the scheduling jitter
+        // can reorder the writes (eg if thread A&B have the same write intervale,
+        // the scheduler could schedule AB...BA)
+        size_t frameCountToBeReady = 2 * sinkFrameCount + sourceFrameCount;
+        // Total secondary output buffer must be at least as the read frames plus
+        // the margin of a few buffers on both sides in case the
+        // threads scheduling has some jitter.
+        // That value should not impact latency as the secondary track is started before
+        // its buffer is full, see frameCountToBeReady.
+        size_t frameCount = frameCountToBeReady + 2 * (sourceFrameCount + sinkFrameCount);
+        // PICO: not smaller than the buffer of the track, as on the factory
+        frameCount = std::max(frameCount, track->frameCount());
+        // The frameCount should also not be smaller than the secondary thread min frame
+        // count
+        size_t minFrameCount = AudioSystem::calculateMinFrameCount(
+                    [&] { Mutex::Autolock _l(secondaryThread->mLock);
+                          return secondaryThread->latency_l(); }(),
+                    secondaryThread->mNormalFrameCount,
+                    secondaryThread->mSampleRate,
+                    track->sampleRate(),
+                    track->getSpeed());
+        frameCount = std::max(frameCount, minFrameCount);
+
+        using namespace std::chrono_literals;
+        auto inChannelMask = audio_channel_mask_out_to_in(track->channelMask());
+        // PICO: factory checks of the patch record configuration
+        if (!audio_is_input_channel(inChannelMask)) {
+            ALOGE("Secondary output patchRecord invalid inChannelMask %#x, track channel_mask %#x",
+                    inChannelMask, track->channelMask());
+            continue;
+        }
+        if (!audio_is_valid_format(track->format())) {
+            ALOGE("Secondary output patchRecord invalid format %#x", track->format());
+            continue;
+        }
+        sp patchRecord = new RecordThread::PatchRecord(nullptr /* thread */,
+                                                       track->sampleRate(),
+                                                       inChannelMask,
+                                                       track->format(),
+                                                       frameCount,
+                                                       nullptr /* buffer */,
+                                                       (size_t)0 /* bufferSize */,
+                                                       AUDIO_INPUT_FLAG_DIRECT,
+                                                       0ns /* timeout */);
+        status_t status = patchRecord->initCheck();
+        if (status != NO_ERROR) {
+            ALOGE("Secondary output patchRecord init failed: %d", status);
+            continue;
+        }
+
+        // TODO: We could check compatibility of the secondaryThread with the PatchTrack
+        // for fast usage: thread has fast mixer, sample rate matches, etc.;
+        // for now, we exclude fast tracks by removing the Fast flag.
+        const audio_output_flags_t outputFlags =
+                (audio_output_flags_t)(track->getOutputFlags() & ~AUDIO_OUTPUT_FLAG_FAST);
+        sp patchTrack = new PlaybackThread::PatchTrack(secondaryThread,
+                                                       track->streamType(),
+                                                       track->sampleRate(),
+                                                       track->channelMask(),
+                                                       track->format(),
+                                                       frameCount,
+                                                       patchRecord->buffer(),
+                                                       patchRecord->bufferSize(),
+                                                       outputFlags,
+                                                       0ns /* timeout */,
+                                                       frameCountToBeReady);
+        status = patchTrack->initCheck();
+        if (status != NO_ERROR) {
+            ALOGE("Secondary output patchTrack init failed: %d", status);
+            continue;
+        }
+        teePatches.push_back({patchRecord, patchTrack});
+        secondaryThread->addPatchTrack(patchTrack);
+        // In case the downstream patchTrack on the secondaryThread temporarily outlives
+        // our created track, ensure the corresponding patchRecord is still alive.
+        patchTrack->setPeerProxy(patchRecord, true /* holdReference */);
+        patchRecord->setPeerProxy(patchTrack, false /* holdReference */);
+    }
+    track->setTeePatches(std::move(teePatches));
 }
 
 sp<AudioFlinger::SyncEvent> AudioFlinger::createSyncEvent(AudioSystem::sync_event_t type,

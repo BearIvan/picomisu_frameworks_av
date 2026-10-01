@@ -240,6 +240,17 @@ audio_unique_id_t AudioPolicyService::AudioPolicyClient::newAudioUniqueId(audio_
     return AudioSystem::newAudioUniqueId(use);
 }
 
+// PICO: Android 12 backport
+status_t AudioPolicyService::AudioPolicyClient::updateSecondaryOutputs(
+        const std::vector<media::TrackSecondaryOutputInfo>& trackSecondaryOutputInfos) {
+    sp<IAudioFlinger> af = AudioSystem::get_audio_flinger();
+    if (af == nullptr) {
+        ALOGW("%s: could not get AudioFlinger", __func__);
+        return PERMISSION_DENIED;
+    }
+    return af->updateSecondaryOutputs(trackSecondaryOutputInfos);
+}
+
 // PICO: spatializer requests of the audio policy service (SpatializerPolicyCallback)
 
 status_t AudioPolicyService::AudioPolicyClient::setSpatializationEnabled(

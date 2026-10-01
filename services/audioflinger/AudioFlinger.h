@@ -284,6 +284,10 @@ public:
 
     virtual status_t getMicrophones(std::vector<media::MicrophoneInfo> *microphones);
 
+    // PICO: Android 12 backport
+    virtual status_t updateSecondaryOutputs(
+            const std::vector<media::TrackSecondaryOutputInfo>& trackSecondaryOutputInfos);
+
     // PICO: spatial audio backport
     virtual status_t invalidateTrack(audio_io_handle_t output, audio_port_handle_t portId);
     virtual status_t setMixerConfig(audio_io_handle_t output, const audio_config_base_t& config);
@@ -692,6 +696,13 @@ using effect_buffer_t = int16_t;
 
               void closeOutputFinish(const sp<PlaybackThread>& thread);
               void closeInputFinish(const sp<RecordThread>& thread);
+
+              // PICO: Android 12 backport. Connects the secondary outputs of the track of
+              // thread (tee patches); AudioFlinger::mLock held.
+              void updateSecondaryOutputsForTrack_l(
+                      PlaybackThread::Track* track,
+                      PlaybackThread* thread,
+                      const std::vector<audio_io_handle_t>& secondaryOutputs) const;
 
               // no range check, AudioFlinger::mLock held
               bool streamMute_l(audio_stream_type_t stream) const
