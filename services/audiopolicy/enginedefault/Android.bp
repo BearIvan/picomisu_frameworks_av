@@ -1,5 +1,8 @@
 cc_library_shared {
     name: "libaudiopolicyenginedefault",
+    // PICO: the factory image has the audio server libraries only in 64 bits (64-bit
+    // audioserver, AUDIOSERVER_MULTILIB 64); no 32-bit variant is built or installed.
+    compile_multilib: "64",
     export_include_dirs: ["include"],
     srcs: [
         "src/Engine.cpp",

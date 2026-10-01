@@ -37,10 +37,8 @@ LOCAL_SHARED_LIBRARIES := \
     libeffectsconfig \
     libsensorprivacy \
     libaudiohal \
-    libstagefright_foundation
-
-# PICO: audio event tracking (factory libaudioeventtracking.so, 64-bit only).
-LOCAL_SHARED_LIBRARIES_arm64 := libaudioeventtracking
+    libstagefright_foundation \
+    libaudioeventtracking
 
 LOCAL_EXPORT_SHARED_LIBRARY_HEADERS := \
     libsensorprivacy

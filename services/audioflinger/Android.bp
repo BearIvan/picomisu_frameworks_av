@@ -2,6 +2,9 @@
 
 cc_library_shared {
     name: "libaudioflinger",
+    // PICO: the factory image has the audio server libraries only in 64 bits (64-bit
+    // audioserver, AUDIOSERVER_MULTILIB 64); no 32-bit variant is built or installed.
+    compile_multilib: "64",
 
     srcs: [
         "AudioDumpUtils.cpp",
@@ -36,6 +39,9 @@ cc_library_shared {
     ],
 
     shared_libs: [
+        // PICO: audio event tracking (factory libaudioeventtracking.so), first as in the
+        // factory DT_NEEDED list.
+        "libaudioeventtracking",
         "libaudiohal",
         "libaudioprocessing",
         "libaudiospdif",
@@ -57,13 +63,9 @@ cc_library_shared {
         "libvibrator",
     ],
 
-    // PICO: audio event tracking (factory libaudioeventtracking.so, 64-bit only).
     header_libs: ["libaudioeventtracking_headers"],
-    arch: {
-        arm64: {
-            shared_libs: ["libaudioeventtracking"],
-        },
-    },
+    // AudioFlinger.h includes it; audioserver includes AudioFlinger.h.
+    export_header_lib_headers: ["libaudioeventtracking_headers"],
 
     static_libs: [
         "libcpustats",
