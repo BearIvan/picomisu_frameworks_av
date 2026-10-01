@@ -500,13 +500,13 @@ audio_devices_t Engine::getDeviceForStrategyInt(legacy_strategy strategy,
                     ALOGI("getDeviceForStrategy() strategy %d, availableOutputDevicesType 0x%x,"
                           "device2 0x%x, record", strategy, availableOutputDevicesType, device2);
                 } else {
-                    device2 = getPicoCastDevice(AUDIO_DEVICE_OUT_REMOTE_SUBMIX,
+                    device2 = getPicoCastDevice(*this, AUDIO_DEVICE_OUT_REMOTE_SUBMIX,
                                                 availableOutputDevicesType, outputs);
                     ALOGI("getDeviceForStrategy() strategy %d, availableOutputDevicesType 0x%x, "
                           "device2 0x%x, lebo", strategy, availableOutputDevicesType, device2);
                 }
             } else if (availableOutputDevicesType & AUDIO_DEVICE_OUT_PROXY) {
-                device2 = getPicoCastDevice(AUDIO_DEVICE_OUT_PROXY,
+                device2 = getPicoCastDevice(*this, AUDIO_DEVICE_OUT_PROXY,
                                             availableOutputDevicesType, outputs);
                 ALOGI("getDeviceForStrategy() strategy %d, availableOutputDevicesType 0x%x, "
                       "device2 0x%x, miracast", strategy, availableOutputDevicesType, device2);
