@@ -476,7 +476,7 @@ void AudioFlinger::PlaybackThread::OpPlayAudioMonitor::checkPlayAudioForUsage()
                 break;
             }
         }
-        ALOGD("OpPlayAudio: track:%d usage:%d %smuted", mId, mUsage, hasIt ? "not " : "");
+        ALOGV("OpPlayAudio: track:%d usage:%d %smuted", mId, mUsage, hasIt ? "not " : "");
         mHasOpPlayAudio.store(hasIt);
     }
 }

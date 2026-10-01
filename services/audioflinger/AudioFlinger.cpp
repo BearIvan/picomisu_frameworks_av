@@ -2883,7 +2883,7 @@ sp<AudioFlinger::ThreadBase> AudioFlinger::openInput_l(audio_module_handle_t mod
                                       mSystemReady
                                       );
             mRecordThreads.add(*input, thread);
-            ALOGV("openInput_l() created record thread: ID %d thread %p", *input, thread.get());
+            ALOGD("openInput_l() created record thread: ID %d thread %p", *input, thread.get());
             return thread;
         }
     }
