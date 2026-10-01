@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-#include <android/hardware/audio/2.0/IDevicesFactory.h>
-#include <android/hardware/audio/4.0/IDevicesFactory.h>
 #include <android/hardware/audio/5.0/IDevicesFactory.h>
 
 #include <libaudiohal/FactoryHalHidl.h>
@@ -23,15 +21,11 @@
 namespace android {
 
 // static
+// PICO: the factory PICO OS 5.13.7 libaudiohal (0x1034) only knows the audio HAL 5.0 (the HAL of
+// the device); it links and ships no libaudiohal@2.0/@4.0.
 sp<DevicesFactoryHalInterface> DevicesFactoryHalInterface::create() {
     if (hardware::audio::V5_0::IDevicesFactory::getService() != nullptr) {
         return V5_0::createDevicesFactoryHal();
-    }
-    if (hardware::audio::V4_0::IDevicesFactory::getService() != nullptr) {
-        return V4_0::createDevicesFactoryHal();
-    }
-    if (hardware::audio::V2_0::IDevicesFactory::getService() != nullptr) {
-        return V2_0::createDevicesFactoryHal();
     }
     return nullptr;
 }

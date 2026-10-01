@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-#include <android/hardware/audio/effect/2.0/IEffectsFactory.h>
-#include <android/hardware/audio/effect/4.0/IEffectsFactory.h>
 #include <android/hardware/audio/effect/5.0/IEffectsFactory.h>
 
 #include <libaudiohal/FactoryHalHidl.h>
@@ -23,15 +21,10 @@
 namespace android {
 
 // static
+// PICO: effect HAL 5.0 only, as the factory libaudiohal (0x2088).
 sp<EffectsFactoryHalInterface> EffectsFactoryHalInterface::create() {
     if (hardware::audio::effect::V5_0::IEffectsFactory::getService() != nullptr) {
         return effect::V5_0::createEffectsFactoryHal();
-    }
-    if (hardware::audio::effect::V4_0::IEffectsFactory::getService() != nullptr) {
-        return effect::V4_0::createEffectsFactoryHal();
-    }
-    if (hardware::audio::effect::V2_0::IEffectsFactory::getService() != nullptr) {
-        return effect::V2_0::createEffectsFactoryHal();
     }
     return nullptr;
 }
