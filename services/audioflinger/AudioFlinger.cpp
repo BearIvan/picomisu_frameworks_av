@@ -2050,7 +2050,8 @@ sp<media::IAudioRecord> AudioFlinger::createRecord(const CreateRecordInput& inpu
             goto Exit;
         }
 
-        ALOGV("createRecord() lSessionId: %d input %d", sessionId, output.inputId);
+        ALOGD("createRecord() lSessionId: %d input %d opPackageName [%s].", sessionId,
+                output.inputId, String8(input.opPackageName).string());
 
         output.sampleRate = input.config.sample_rate;
         output.frameCount = input.frameCount;
