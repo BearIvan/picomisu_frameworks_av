@@ -65,7 +65,7 @@ class SurfaceMediaSource : public MediaSource,
 public:
     enum { MIN_UNDEQUEUED_BUFFERS = 4};
 
-    struct FrameAvailableListener : public android::RefBase {
+    struct FrameAvailableListener : public virtual RefBase {
         // onFrameAvailable() is called from queueBuffer() is the FIFO is
         // empty. You can use SurfaceMediaSource::getQueuedCount() to
         // figure out if there are more frames waiting.
