@@ -2890,7 +2890,7 @@ bool AudioPolicyManager::isSourceActive(audio_source_t source) const
 
 status_t AudioPolicyManager::registerPolicyMixes(const Vector<AudioMix>& mixes)
 {
-    ALOGV("registerPolicyMixes() %zu mix(es)", mixes.size());
+    ALOGD("registerPolicyMixes() %zu mix(es)", mixes.size());
     status_t res = NO_ERROR;
 
     sp<HwModule> rSubmixModule;
@@ -3000,13 +3000,15 @@ status_t AudioPolicyManager::registerPolicyMixes(const Vector<AudioMix>& mixes)
     if (res != NO_ERROR) {
         unregisterPolicyMixes(mixes);
     }
+    ALOGD("registerPolicyMixes() %zu mix(es) done", mixes.size());
     return res;
 }
 
 status_t AudioPolicyManager::unregisterPolicyMixes(Vector<AudioMix> mixes)
 {
-    ALOGV("unregisterPolicyMixes() num mixes %zu", mixes.size());
+    ALOGD("unregisterPolicyMixes() num mixes %zu", mixes.size());
     status_t res = NO_ERROR;
+    bool checkOutputs = false;
     sp<HwModule> rSubmixModule;
     // examine each mix's route type
     for (const auto& mix : mixes) {
@@ -3042,6 +3044,8 @@ status_t AudioPolicyManager::unregisterPolicyMixes(Vector<AudioMix> mixes)
             }
             rSubmixModule->removeOutputProfile(address);
             rSubmixModule->removeInputProfile(address);
+            // PICO: re-evaluate the outputs once a remote submix mix is gone
+            checkOutputs = true;
 
         } else if ((mix.mRouteFlags & MIX_ROUTE_FLAG_RENDER) == MIX_ROUTE_FLAG_RENDER) {
             if (mPolicyMixes.unregisterMix(mix) != NO_ERROR) {
@@ -3050,6 +3054,10 @@ status_t AudioPolicyManager::unregisterPolicyMixes(Vector<AudioMix> mixes)
             }
         }
     }
+    if (res == NO_ERROR && checkOutputs) {
+        checkForDeviceAndOutputChanges();
+    }
+    ALOGD("unregisterPolicyMixes() num mixes %zu done", mixes.size());
     return res;
 }
 
