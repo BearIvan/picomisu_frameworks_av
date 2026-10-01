@@ -419,11 +419,13 @@ status_t AudioTrack::set(
     pid_t myPid;
 
     // Note mPortId is not valid until the track is created, so omit mPortId in ALOG for set.
-    ALOGV("%s(): streamType %d, sampleRate %u, format %#x, channelMask %#x, frameCount %zu, "
-          "flags #%x, notificationFrames %d, sessionId %d, transferType %d, uid %d, pid %d",
+    // PICO: debug level with the attributes flags, as on the factory
+    ALOGD("%s(): streamType %d, sampleRate %u, format %#x, channelMask %#x, frameCount %zu, "
+          "flags %#x, notificationFrames %d, sessionId %d, transferType %d, uid %d, pid %d "
+          "attrFLags 0x%x",
           __func__,
           streamType, sampleRate, format, channelMask, frameCount, flags, notificationFrames,
-          sessionId, transferType, uid, pid);
+          sessionId, transferType, uid, pid, pAttributes == NULL ? 0 : pAttributes->flags);
 
     mThreadCanCallJava = threadCanCallJava;
     mSelectedDeviceId = selectedDeviceId;

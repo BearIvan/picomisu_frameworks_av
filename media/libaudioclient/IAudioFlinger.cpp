@@ -1081,7 +1081,10 @@ status_t BnAudioFlinger::onTransact(
             break;
     }
 
-    std::string tag("IAudioFlinger command " + std::to_string(code));
+    // PICO: the watchdog tag names the caller
+    std::string tag("IAudioFlinger command " + std::to_string(code) + " , CallingPID "
+            + std::to_string(IPCThreadState::self()->getCallingPid()) + " , TID "
+            + std::to_string(gettid()));
 
     TimeCheck check(tag.c_str());
 

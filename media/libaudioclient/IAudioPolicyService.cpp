@@ -1457,9 +1457,10 @@ status_t BnAudioPolicyService::onTransact(
     std::string tag("IAudioPolicyService command " + std::to_string(code) + " , CallingPID "
             + std::to_string(IPCThreadState::self()->getCallingPid()) + " , TID "
             + std::to_string(gettid()));
+    String8 keyValuePairs; // PICO: declared before the check and assigned, as on the factory
     if (code == SET_PARAMETERS_TO_POLICY) {
         CHECK_INTERFACE(IAudioPolicyService, data, reply);
-        String8 keyValuePairs(data.readString8());
+        keyValuePairs = data.readString8();
         tag.append("-");
         tag.append(keyValuePairs.string());
         TimeCheck check(tag.c_str());
