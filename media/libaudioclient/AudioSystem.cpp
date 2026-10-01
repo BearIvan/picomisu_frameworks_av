@@ -644,7 +644,12 @@ void AudioSystem::AudioFlingerClient::ioConfigChanged(audio_io_config_event even
     // example getRoutedDevice that updates the device and tries to acquire mLock.
     for (auto cb  : callbacksToCall) {
         // If callbacksToCall is not empty, it implies ioDesc->mIoHandle and deviceId are valid
-        cb->onAudioDeviceUpdate(ioDesc->mIoHandle, deviceId);
+        if (deviceId != AUDIO_PORT_HANDLE_NONE) {
+            cb->onAudioDeviceUpdate(ioDesc->mIoHandle, deviceId);
+        } else {
+            ALOGW("ioConfigChanged() io %d port %d deviceId = 0 is invalid not to callbackToCall",
+                    ioDesc->mIoHandle, ioDesc->mPortId);
+        }
     }
 }
 
