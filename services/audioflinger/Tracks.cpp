@@ -129,6 +129,8 @@ AudioFlinger::ThreadBase::TrackBase::TrackBase(
     if (minBufferSize < frameCount  // roundup rounds down for values above UINT_MAX / 2
             || mFrameSize == 0   // format needs to be correct
             || minBufferSize > SIZE_MAX / mFrameSize) {
+        ALOGW("%s(34749571): minBufferSize %zu, frameCount %zu, mFrameSize %zu",
+                __func__, minBufferSize, frameCount, mFrameSize);
         android_errorWriteLog(0x534e4554, "34749571");
         return;
     }
@@ -137,6 +139,8 @@ AudioFlinger::ThreadBase::TrackBase::TrackBase(
     if (buffer == nullptr) {
         bufferSize = minBufferSize; // allocated here.
     } else if (minBufferSize > bufferSize) {
+        ALOGW("%s(38340117): minBufferSize %zu, frameCount %zu, bufferSize %zu",
+                __func__, minBufferSize, frameCount, bufferSize);
         android_errorWriteLog(0x534e4554, "38340117");
         return;
     }
@@ -145,6 +149,8 @@ AudioFlinger::ThreadBase::TrackBase::TrackBase(
     if (buffer == NULL && alloc == ALLOC_CBLK) {
         // check overflow when computing allocation size for streaming tracks.
         if (size > SIZE_MAX - bufferSize) {
+            ALOGW("%s(34749571): size %zu, bufferSize %zu, frameCount %zu",
+                    __func__, size, bufferSize, frameCount);
             android_errorWriteLog(0x534e4554, "34749571");
             return;
         }
