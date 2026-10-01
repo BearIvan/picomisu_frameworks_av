@@ -48,9 +48,11 @@ struct start_event_t {
     int32_t stream;                     // 0x120 audio_stream_type_t (playback)
     audio_config_base_t config;         // 0x124 sample_rate, channel_mask, format
     uint32_t flags;                     // 0x130 audio_output_flags_t / audio_input_flags_t
-    int32_t reserved;                   // 0x134 (1 in the factory playback path)
-    uint32_t castDevice;                // 0x138 AUDIO_DEVICE_OUT_BUS or REMOTE_SUBMIX, if any
-    int32_t spatialized;                // 0x13c
+    // playback (AudioPolicyService::doStartOutput), 0 for a capture:
+    uint32_t mixerChannelMask;          // 0x134 channel mask of the spatializer mixer
+    uint32_t spatializeFlags;           // 0x138 AUDIO_FLAG_ALWAYS_SPATIALIZE or
+                                        //       AUDIO_FLAG_NEVER_SPATIALIZE of the client
+    int32_t spatialized;                // 0x13c the client is spatialized
 };
 static_assert(sizeof(start_event_t) == 0x140, "factory start_event_t layout");
 

@@ -18,6 +18,11 @@
 //#define LOG_NDEBUG 0
 
 #include "AudioPolicyService.h"
+#include "PicoAudioEventTracker.h"
+#include <AudioOutputDescriptor.h>
+#include <AudioRoute.h>
+#include <HwModule.h>
+#include <IOProfile.h>
 #include "Spatializer.h"
 #include "TypeConverter.h"
 #include <cutils/properties.h>
@@ -315,10 +320,38 @@ status_t AudioPolicyService::doStartOutput(audio_port_handle_t portId)
         client->active = true;
         // PICO: the spatializer spatializes the client if it plays on the spatializer output
         mLock.unlock();
+        uint32_t mixerChannelMask = 0;
+        uint32_t spatializeFlags = 0;
+        bool spatialized = false;
         if (mSpatializer != nullptr) {
             mSpatializer->onStartOutput(portId);
+            mSpatializer->getPlaybackStartState(portId, &mixerChannelMask, &spatializeFlags,
+                                                &spatialized);
         }
         mLock.lock();
+        // PICO: report the playback start to the audio event tracker (its end is reported by
+        // the audio policy manager, AudioPolicyManagerCustom::stopSource())
+        sp<SwAudioOutputDescriptor> outputDesc =
+                mAudioPolicyManager->getOutputDescriptor(client->io);
+        if (outputDesc != 0) {
+            // The factory dereferences the client without checking it.
+            sp<TrackClientDescriptor> trackClient = outputDesc->getClient(portId);
+            if (trackClient != 0) {
+                pico::audioeventtracking::start_event_t event = {};
+                event.portId = portId;
+                event.io = client->io;
+                event.uid = trackClient->uid();
+                event.device = outputDesc->devices().types();
+                event.attributes = trackClient->attributes();
+                event.stream = trackClient->stream();
+                event.config = trackClient->config();
+                event.flags = trackClient->flags();
+                event.mixerChannelMask = mixerChannelMask;
+                event.spatializeFlags = spatializeFlags;
+                event.spatialized = spatialized;
+                pico::audioeventtracking::AudioEventTrackerBridge::onPlaybackStarted(event);
+            }
+        }
     }
     return status;
 }

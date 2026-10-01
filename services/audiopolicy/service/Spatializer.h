@@ -168,6 +168,12 @@ class Spatializer : public media::BnSpatializer,
                             bool isSpatialized);
     /** Called by audio policy service when a playback client starts, stops, is released */
     void onStartOutput(audio_port_handle_t portId);
+    /** PICO: spatializer state of a started client reported to the audio event tracker by
+     *  the audio policy service: the mixer channel mask, the AUDIO_FLAG_ALWAYS_SPATIALIZE or
+     *  AUDIO_FLAG_NEVER_SPATIALIZE flag of the client attributes and whether the client is
+     *  spatialized (0 for an unknown client). */
+    void getPlaybackStartState(audio_port_handle_t portId, uint32_t *mixerChannelMask,
+                               uint32_t *spatializeFlags, bool *spatialized);
     void onStopOutput(audio_port_handle_t portId);
     void onReleaseOutput(audio_port_handle_t portId);
     /** Called by audio policy service when the client process pid dies */

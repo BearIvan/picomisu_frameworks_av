@@ -1063,6 +1063,30 @@ void Spatializer::onStartOutput(audio_port_handle_t portId) {
     ALOGD("onStartOutput out %d", portId);
 }
 
+void Spatializer::getPlaybackStartState(audio_port_handle_t portId, uint32_t *mixerChannelMask,
+                                        uint32_t *spatializeFlags, bool *spatialized) {
+    // factory doStartOutput (inlined in AudioCommandThread::threadLoop, 0x2937c..0x29a24)
+    *mixerChannelMask = mMixerConfig.channel_mask;
+    *spatializeFlags = 0;
+    *spatialized = false;
+    {
+        std::lock_guard<std::mutex> lock(mLock);
+        auto it = mClients.find(portId);
+        if (it != mClients.end()) {
+            const audio_flags_mask_t flags = it->second->attributes.flags;
+            *spatializeFlags = (flags & AUDIO_FLAG_ALWAYS_SPATIALIZE) != 0
+                    ? AUDIO_FLAG_ALWAYS_SPATIALIZE : (flags & AUDIO_FLAG_NEVER_SPATIALIZE);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(mLock);
+        auto it = mClients.find(portId);
+        if (it != mClients.end()) {
+            *spatialized = it->second->spatialized;
+        }
+    }
+}
+
 void Spatializer::onStopOutput(audio_port_handle_t portId) {
     ALOGD("onStopOutput %d", portId);
     std::lock_guard<std::mutex> lock(mLock);
