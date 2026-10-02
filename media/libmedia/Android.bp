@@ -186,7 +186,7 @@ cc_library_shared {
             "unsigned-integer-overflow",
             "signed-integer-overflow",
         ],
-        cfi: true,
+        cfi: false, // PICO: built without CFI on the factory image
     },
 }
 

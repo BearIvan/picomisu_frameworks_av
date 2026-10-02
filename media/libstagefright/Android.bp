@@ -69,7 +69,7 @@ cc_library_shared {
     ],
 
     sanitize: {
-        cfi: true,
+        cfi: false, // PICO: built without CFI on the factory image
         misc_undefined: [
             "unsigned-integer-overflow",
             "signed-integer-overflow",
@@ -269,7 +269,7 @@ cc_library {
     },
 
     sanitize: {
-        cfi: true,
+        cfi: false, // PICO: built without CFI on the factory image
         misc_undefined: [
             "unsigned-integer-overflow",
             "signed-integer-overflow",
