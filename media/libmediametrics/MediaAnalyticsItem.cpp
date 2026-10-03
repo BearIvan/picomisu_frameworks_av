@@ -50,7 +50,7 @@ const MediaAnalyticsItem::Key MediaAnalyticsItem::kKeyNone  = "none";
 
 const char * const MediaAnalyticsItem::EnabledProperty  = "media.metrics.enabled";
 const char * const MediaAnalyticsItem::EnabledPropertyPersist  = "persist.media.metrics.enabled";
-const int MediaAnalyticsItem::EnabledProperty_default  = 1;
+const int MediaAnalyticsItem::EnabledProperty_default  = 0; // PICO: as on the factory PICO OS 5.13.7 (no media.metrics service)
 
 // So caller doesn't need to know size of allocated space
 MediaAnalyticsItem *MediaAnalyticsItem::create()
